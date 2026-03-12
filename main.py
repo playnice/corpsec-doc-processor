@@ -23,7 +23,7 @@ from pathlib import Path
 
 import config
 from ocr_engine import extract_text
-from ai_analyzer import analyze_document
+from ai_analyzer import analyze_document, analyze_document_vision
 from renamer import rename_pdf
 from teamwork_uploader import TeamworkUploader
 from watcher import start_watching
@@ -51,20 +51,19 @@ def process_pdf(pdf_path: Path) -> None:
     logger.info("=" * 60)
     logger.info("Processing: %s", pdf_path.name)
 
-    # Step 1: OCR / text extraction
+    # Step 1: Try direct text extraction (works for digitally-created PDFs)
     logger.info("[1/4] Extracting text...")
     text = extract_text(pdf_path)
-    if not text:
-        logger.error("No text extracted from %s — moving to errors folder.", pdf_path.name)
-        _move_to_errors(pdf_path)
-        return
 
-    logger.info("Extracted %d characters of text.", len(text))
-    logger.debug("First 500 chars: %s", text[:500])
-
-    # Step 2: AI analysis
-    logger.info("[2/4] Analyzing with %s...", config.OLLAMA_MODEL)
-    metadata = analyze_document(text)
+    # Step 2: AI analysis — choose path based on whether text was found
+    if len(text) > 50:
+        # Digital PDF: analyse the extracted text
+        logger.info("[2/4] Analyzing text with %s...", config.OLLAMA_MODEL)
+        metadata = analyze_document(text)
+    else:
+        # Scanned/image PDF: send page images directly to the vision model
+        logger.info("[2/4] Scanned PDF detected — analyzing with vision model %s...", config.OLLAMA_VISION_MODEL)
+        metadata = analyze_document_vision(pdf_path)
     logger.info(
         "Extracted — Company: %s | Type: %s | Date: %s | Confidence: %s",
         metadata.company_name,
@@ -165,7 +164,8 @@ def run_watch_mode() -> None:
     logger.info("Starting CorpSec Document Processor — Watch Mode")
     logger.info("Inbox folder: %s", config.WATCH_FOLDER)
     logger.info("Processed folder: %s", config.PROCESSED_FOLDER)
-    logger.info("Ollama model: %s", config.OLLAMA_MODEL)
+    logger.info("Ollama text model:   %s", config.OLLAMA_MODEL)
+    logger.info("Ollama vision model: %s", config.OLLAMA_VISION_MODEL)
 
     # Ensure folders exist
     config.WATCH_FOLDER.mkdir(parents=True, exist_ok=True)
