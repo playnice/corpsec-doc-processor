@@ -1,45 +1,47 @@
 """
 OCR Engine module.
-Extracts text from digitally-created PDFs using PyMuPDF, and renders
-PDF pages as images for vision-model analysis of scanned documents.
+Extracts text from scanned PDF documents using OCRmyPDF and PyMuPDF.
 """
 
-import io
 import logging
+import subprocess
+import tempfile
 from pathlib import Path
 
 import fitz  # PyMuPDF
-from PIL import Image
+
+import config
 
 logger = logging.getLogger(__name__)
-
-# Maximum pixel height for a merged image sent to the vision model.
-# Pages are scaled down proportionally if this limit is exceeded.
-_MAX_MERGED_HEIGHT = 8000
 
 
 def extract_text(pdf_path: Path) -> str:
     """
-    Extract text directly from a digitally-created PDF using PyMuPDF.
-    Returns an empty string (or very short text) for scanned/image-only PDFs —
-    callers should check length and fall back to vision analysis in that case.
+    Extract text from a PDF. First tries direct text extraction (for
+    digitally-created PDFs). If that yields little text, falls back to OCR.
 
     Args:
         pdf_path: Path to the PDF file.
 
     Returns:
-        Extracted text content (may be empty for scanned PDFs).
+        Extracted text content.
     """
-    text = extract_text_direct(pdf_path)
+    # Step 1: Try direct text extraction with PyMuPDF
+    text = _extract_text_direct(pdf_path)
+
     if len(text.strip()) > 50:
         logger.info("Direct text extraction succeeded (%d chars)", len(text))
-    else:
-        logger.info("Direct extraction yielded little text — PDF is likely scanned.")
+        return text.strip()
+
+    # Step 2: Fall back to OCR
+    logger.info("Direct extraction yielded little text, running OCR...")
+    text = _extract_text_ocr(pdf_path)
+    logger.info("OCR extraction complete (%d chars)", len(text))
     return text.strip()
 
 
-def extract_text_direct(pdf_path: Path) -> str:
-    """Extract embedded text directly from a PDF using PyMuPDF."""
+def _extract_text_direct(pdf_path: Path) -> str:
+    """Extract text directly from PDF using PyMuPDF."""
     text_parts = []
     try:
         doc = fitz.open(str(pdf_path))
@@ -51,71 +53,50 @@ def extract_text_direct(pdf_path: Path) -> str:
     return "\n".join(text_parts)
 
 
-def merge_pages_to_image(pdf_path: Path, dpi: int = 150, max_pages: int = 6) -> bytes | None:
+def _extract_text_ocr(pdf_path: Path) -> str:
     """
-    Render PDF pages and stitch them vertically into a single PNG image.
-    Gives the vision model the full document context in one request.
-
-    Pages are rendered at `dpi` resolution and composited top-to-bottom on a
-    white canvas.  If the merged height exceeds _MAX_MERGED_HEIGHT the entire
-    canvas is scaled down proportionally so the model receives a reasonably
-    sized image.
-
-    Args:
-        pdf_path:  Path to the PDF file.
-        dpi:       Render resolution per page (150 is a good default).
-        max_pages: Maximum number of pages to include (caps very long documents).
-
-    Returns:
-        PNG image bytes of the merged page strip, or None on failure.
+    Run OCRmyPDF to produce a searchable PDF, then extract text from it.
+    OCRmyPDF wraps Tesseract and handles image pre-processing automatically.
     """
-    pil_pages: list[Image.Image] = []
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
     try:
-        doc = fitz.open(str(pdf_path))
-        pages = list(doc)[:max_pages]
-        for page in pages:
-            pix = page.get_pixmap(dpi=dpi)
-            mode = "RGBA" if pix.alpha else "RGB"
-            img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            pil_pages.append(img)
-        doc.close()
-    except Exception:
-        logger.exception("Failed to render pages from %s", pdf_path.name)
-        return None
-
-    if not pil_pages:
-        return None
-
-    canvas_w = max(img.width for img in pil_pages)
-    canvas_h = sum(img.height for img in pil_pages)
-
-    # Scale down if the merged strip is too tall
-    scale = 1.0
-    if canvas_h > _MAX_MERGED_HEIGHT:
-        scale = _MAX_MERGED_HEIGHT / canvas_h
-        canvas_w = int(canvas_w * scale)
-        canvas_h = _MAX_MERGED_HEIGHT
-        pil_pages = [
-            img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-            for img in pil_pages
+        cmd = [
+            "ocrmypdf",
+            "--force-ocr",          # OCR even if text layer exists
+            "--skip-text",          # but skip pages that already have text
+            "--output-type", "pdf",
+            "--tesseract-timeout", "120",
+            str(pdf_path),
+            str(tmp_path),
         ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
 
-    canvas = Image.new("RGB", (canvas_w, canvas_h), color=(255, 255, 255))
-    y = 0
-    for img in pil_pages:
-        x = (canvas_w - img.width) // 2  # centre-align narrower pages
-        canvas.paste(img, (x, y))
-        y += img.height
+        if result.returncode not in (0, 6):
+            # Return code 6 = "file already has text" (still okay)
+            logger.warning("OCRmyPDF returned code %d: %s", result.returncode, result.stderr)
 
-    buf = io.BytesIO()
-    canvas.save(buf, format="PNG")
-    merged_bytes = buf.getvalue()
+        # Extract text from the OCR'd PDF
+        text = _extract_text_direct(tmp_path)
+        return text
 
-    logger.info(
-        "Merged %d page(s) from %s into single image (%dx%dpx, %.1f KB)",
-        len(pil_pages), pdf_path.name, canvas_w, canvas_h, len(merged_bytes) / 1024,
-    )
-    return merged_bytes
-
+    except subprocess.TimeoutExpired:
+        logger.error("OCR timed out for %s", pdf_path.name)
+        return ""
+    except FileNotFoundError:
+        logger.error(
+            "ocrmypdf not found. Install it: pip install ocrmypdf "
+            "and ensure Tesseract is installed."
+        )
+        return ""
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass

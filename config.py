@@ -17,14 +17,13 @@ ERROR_FOLDER = Path(os.getenv("ERROR_FOLDER", r"C:\CorpSec\Errors"))
 # --- Ollama ---
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-# Vision model for scanned PDFs — reads page images directly, bypassing Tesseract.
-# Recommended: llama3.2-vision (best accuracy for document text)
-# Alternatives: llama3.2-vision:90b (more accurate, very heavy), minicpm-v (lightweight), gemma3:12b
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision")
 
 # --- Teamwork ---
 TEAMWORK_BASE_URL = os.getenv("TEAMWORK_BASE_URL", "")
 TEAMWORK_API_KEY = os.getenv("TEAMWORK_API_KEY", "")
+
+# --- Tesseract ---
+TESSERACT_CMD = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
 # --- Logging ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
