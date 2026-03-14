@@ -35,11 +35,18 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 COMPANY_SHORT_NAMES: dict[str, str] = {
     "zoo capital fund ii pte ltd": "ZCFII",
     "zoo capital fund ii pte. ltd.": "ZCFII",
-    "zoo capital fund i pte ltd": "ZCFI",
-    "zoo capital fund i pte. ltd.": "ZCFI",
     # Add more mappings as needed:
     # "acme holdings pte ltd": "ACME",
     # "global ventures sdn bhd": "GVSB",
+}
+
+
+# Words to exclude when generating abbreviations from company names
+_ENTITY_SUFFIXES = {
+    "pte", "ltd", "pte.", "ltd.", "sdn", "bhd", "sdn.", "bhd.",
+    "inc", "inc.", "corp", "corp.", "co", "co.",
+    "limited", "private", "company", "incorporated",
+    "llc", "llp", "lp", "plc",
 }
 
 
@@ -59,11 +66,11 @@ def get_company_short_name(full_name: str) -> str:
         if key in lookup or lookup in key:
             return short
 
-    # Fallback: generate abbreviation from capital letters of original name
-    # e.g. "Zoo Capital Fund II Pte Ltd" -> "ZCFIPL"
+    # Fallback: generate abbreviation from meaningful words only
+    # e.g. "Zoo Capital Fund II Pte Ltd" -> "ZCFII" (not "ZCFIPL")
     abbreviation = "".join(
         word[0].upper()
         for word in full_name.split()
-        if word[0].isalpha()
+        if word[0].isalpha() and word.lower().rstrip(".,") not in _ENTITY_SUFFIXES
     )
     return abbreviation if abbreviation else "UNKNOWN"

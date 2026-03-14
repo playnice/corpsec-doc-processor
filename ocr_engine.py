@@ -4,6 +4,7 @@ Extracts text from scanned PDF documents using OCRmyPDF and PyMuPDF.
 """
 
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -13,6 +14,9 @@ import fitz  # PyMuPDF
 import config
 
 logger = logging.getLogger(__name__)
+
+# Tesseract user-words file to bias OCR toward known company name tokens
+_USER_WORDS_FILE = Path(__file__).parent / "tesseract_words.txt"
 
 
 def extract_text(pdf_path: Path) -> str:
@@ -65,12 +69,18 @@ def _extract_text_ocr(pdf_path: Path) -> str:
         cmd = [
             "ocrmypdf",
             "--force-ocr",          # OCR even if text layer exists
-            "--skip-text",          # but skip pages that already have text
+            "--deskew",             # straighten tilted scans
+            "--clean",              # clean page images before OCR
+            "--oversample", "300",  # upscale low-res scans to 300 DPI
             "--output-type", "pdf",
             "--tesseract-timeout", "120",
-            str(pdf_path),
-            str(tmp_path),
         ]
+
+        # Provide a custom word list so Tesseract prefers "ZOO" over "200" etc.
+        if _USER_WORDS_FILE.exists():
+            cmd += ["--user-words", str(_USER_WORDS_FILE)]
+
+        cmd += [str(pdf_path), str(tmp_path)]
         result = subprocess.run(
             cmd,
             capture_output=True,
