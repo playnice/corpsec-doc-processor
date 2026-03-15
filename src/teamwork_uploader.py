@@ -160,7 +160,6 @@ class TeamworkUploader:
             # Wait for dashboard
             page.wait_for_url("**/dashboard**", timeout=NAV_TIMEOUT)
             logger.info("[Step 0] Login successful — reached dashboard.")
-            self._save_screenshot("step0_dashboard")
             self._logged_in = True
             return True
 
@@ -203,7 +202,6 @@ class TeamworkUploader:
             companies_link.click(timeout=ACTION_TIMEOUT)
             page.wait_for_load_state("networkidle")
             logger.info("[Step 3] Navigated to Companies listing.")
-            self._save_screenshot("step3_companies")
             return True
 
         except PwTimeout:
@@ -231,7 +229,6 @@ class TeamworkUploader:
             search_box.fill(search_term)
             # DataTables filters on keyup, wait for table to re-render
             time.sleep(2)
-            self._save_screenshot("step4_search_results")
 
             # Step 5: Find the matching row and click its View button
             logger.info("[Step 5] Looking for matching company row...")
@@ -263,7 +260,6 @@ class TeamworkUploader:
             view_btn.click(timeout=ACTION_TIMEOUT)
             page.wait_for_load_state("networkidle")
             logger.info("[Step 5] Opened company profile.")
-            self._save_screenshot("step5_company_profile")
             return True
 
         except PwTimeout:
@@ -293,7 +289,6 @@ class TeamworkUploader:
             page.wait_for_load_state("networkidle")
             time.sleep(1)
             logger.info("[Step 6] Files tab opened.")
-            self._save_screenshot("step6_files_tab")
             return True
 
         except PwTimeout:
@@ -324,7 +319,6 @@ class TeamworkUploader:
                     page.wait_for_load_state("networkidle")
                     time.sleep(1)
                     logger.info("[Step 7] Upload form opened.")
-                    self._save_screenshot("step7_upload_form")
                     return True
 
             logger.error("No visible Upload button found.")
@@ -368,7 +362,6 @@ class TeamworkUploader:
             file_input.set_input_files(str(file_path), timeout=ACTION_TIMEOUT)
             time.sleep(2)
             logger.info("[Step 8] File selected.")
-            self._save_screenshot("step8_file_selected")
             return True
 
         except PwTimeout:
@@ -462,7 +455,6 @@ class TeamworkUploader:
 
             logger.info("[Step 10] JS result: %s", result)
             time.sleep(0.5)
-            self._save_screenshot("step10_date_filled")
             return True
 
         except Exception as exc:
@@ -589,7 +581,6 @@ class TeamworkUploader:
 
             logger.info("[Step 11] JS result: %s", result)
             time.sleep(0.5)
-            self._save_screenshot("step11_category_selected")
             return True
 
         except Exception as exc:
@@ -629,7 +620,6 @@ class TeamworkUploader:
             # Scroll to the bottom so Save button becomes visible
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             time.sleep(0.5)
-            self._save_screenshot("step12_before_save")
 
             # Dump nearby HTML for debugging
             save_area_html = page.evaluate("""
@@ -725,7 +715,6 @@ class TeamworkUploader:
             ).first
             if success.is_visible(timeout=5000):
                 logger.info("[Step 12] Upload saved successfully!")
-                self._save_screenshot("step12_success")
                 return True
 
             # Check for errors
