@@ -1,8 +1,13 @@
 """
 Renamer module.
 Generates standardized filenames from document metadata and renames PDFs.
-Format: YYYYMMDD CompanyShortName-Document Type.pdf
+
+Standard format: YYYYMMDD CompanyShortName-Document Type.pdf
 Example: 20220519 ZCFII-Authority to Issue Shares.pdf
+
+ACRA officer-change documents get special naming:
+  - Appointment only:  20220501 ZCFII-Appointment of Director.pdf
+  - Change (cessation): 20220501 ZCFII-Change of Director.pdf
 """
 
 import logging
@@ -17,6 +22,39 @@ logger = logging.getLogger(__name__)
 
 # Characters not allowed in Windows filenames
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Pattern to detect ACRA officer-change documents from document_type or content
+_ACRA_OFFICER_CHANGE = re.compile(
+    r"(appointment|cessation).*?(officer|auditor|company)",
+    re.IGNORECASE,
+)
+
+
+def _is_officer_change_doc(metadata: DocumentMetadata) -> bool:
+    """Check if the document is an ACRA Change in Company Information
+    (Appointment/Cessation of Officers/Auditors) document."""
+    for field in (metadata.document_type, metadata.document_content):
+        if field and _ACRA_OFFICER_CHANGE.search(field):
+            return True
+    return False
+
+
+def _build_officer_change_type(metadata: DocumentMetadata) -> str:
+    """Build the document type string for ACRA officer-change documents.
+
+    Rules:
+      1. All entries have cessation details → "Resignation of [Position]"
+      2. Some cessation found (mixed appt + cessation) → "Change of [Position]"
+      3. Only appointment (no cessation) → "Appointment of [Position]"
+    """
+    position = metadata.position_held or "Officers"
+
+    if metadata.all_cessation:
+        return f"Resignation of {position}"
+    elif metadata.has_cessation:
+        return f"Change of {position}"
+    else:
+        return f"Appointment of {position}"
 
 
 def generate_filename(metadata: DocumentMetadata) -> str | None:
@@ -45,8 +83,14 @@ def generate_filename(metadata: DocumentMetadata) -> str | None:
     # Get company short name
     short_name = config.get_company_short_name(metadata.company_name)
 
-    # Document type (default if not detected)
-    doc_type = metadata.document_type or "Document"
+    # ACRA officer-change documents get special naming
+    if _is_officer_change_doc(metadata):
+        doc_type = _build_officer_change_type(metadata)
+        logger.info("ACRA officer-change doc → '%s'", doc_type)
+    else:
+        # Standard document type
+        doc_type = metadata.document_type or "Document"
+
     # Clean up document type - Title Case, strip excess whitespace
     doc_type = " ".join(doc_type.split())
 

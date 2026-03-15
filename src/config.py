@@ -7,20 +7,28 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# --- Folder Paths (under data/ relative to project root) ---
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent  # repo root (parent of src/)
+_DATA_DIR = _PROJECT_ROOT / "data"
 
-# --- Folder Paths ---
-WATCH_FOLDER = Path(os.getenv("WATCH_FOLDER", r"C:\CorpSec\Inbox"))
-PROCESSED_FOLDER = Path(os.getenv("PROCESSED_FOLDER", r"C:\CorpSec\Processed"))
-ERROR_FOLDER = Path(os.getenv("ERROR_FOLDER", r"C:\CorpSec\Errors"))
+load_dotenv(_PROJECT_ROOT / ".env")
+
+WATCH_FOLDER = _DATA_DIR / "Inbox"
+RENAMED_FOLDER = _DATA_DIR / "Renamed"
+UPLOADED_FOLDER = _DATA_DIR / "Uploaded"
+ERROR_FOLDER = _DATA_DIR / "Errors"
 
 # --- Ollama ---
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
-# --- Teamwork ---
-TEAMWORK_BASE_URL = os.getenv("TEAMWORK_BASE_URL", "")
-TEAMWORK_API_KEY = os.getenv("TEAMWORK_API_KEY", "")
+# --- Teamwork.sg (browser automation) ---
+TEAMWORK_LOGIN_URL = os.getenv("TEAMWORK_LOGIN_URL", "https://login.teamwork.sg/")
+TEAMWORK_COMPANY_ID = os.getenv("TEAMWORK_COMPANY_ID", "")
+TEAMWORK_USERNAME = os.getenv("TEAMWORK_USERNAME", "")
+TEAMWORK_PASSWORD = os.getenv("TEAMWORK_PASSWORD", "")
+TEAMWORK_HEADLESS = os.getenv("TEAMWORK_HEADLESS", "true").lower() in ("true", "1", "yes")
+TEAMWORK_SCREENSHOTS_DIR = _DATA_DIR / "Screenshots"
 
 # --- Tesseract ---
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")

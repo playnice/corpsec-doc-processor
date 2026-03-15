@@ -79,8 +79,14 @@ Extract the following information and return ONLY a valid JSON object (no markdo
 {{
   "company_name": "Full registered company name as it appears in the document",
   "document_type": "The type/title of the document (e.g. 'Authority to Issue Shares', 'Board Resolution', 'Annual Return', 'Notice of AGM', 'Certificate of Incorporation', 'Share Transfer Form', 'Directors Resolution in Writing', 'Memorandum and Articles of Association')",
+  "document_content": "A brief summary of the document's subject matter or purpose (e.g. 'Opening of Bank Accounts with DBS Bank', 'Appointment of John Tan as Director', 'Allotment of 100,000 ordinary shares'). This should describe WHAT the document is about, not its type.",
   "document_date": "The primary date of the document in YYYY-MM-DD format. Look for dates near the top of the document, signature dates, or resolution dates. If multiple dates exist, use the main document date, not filing dates.",
-  "confidence": "high/medium/low - your confidence in the extraction accuracy"
+  "confidence": "high/medium/low - your confidence in the extraction accuracy",
+  "position_held": "If this is an ACRA 'Change in Company Information' document about appointment/cessation of officers or auditors, extract the 'Position held' value (e.g. 'Director', 'Secretary', 'Auditor'). Otherwise null.",
+  "has_appointment_date": "true if a 'Date of Appointment' field with a date value is found, false otherwise",
+  "has_cessation_date": "true if a 'Date of Cessation' field with a date value is found, false otherwise",
+  "has_cessation_reason": "true if a 'Reason of Cessation' field with a value is found, false otherwise",
+  "entry_indicators": "If you see patterns like '[1/2]', '[2/2]' or 'Appointment or Cessation of Company Officers or Auditors [1/2]', return the total count (e.g. 2). Otherwise null."
 }}
 
 IMPORTANT — This text comes from OCR which often confuses visually similar characters.
@@ -96,6 +102,7 @@ Rules:
 - For company_name: Use the corrected full legal name (e.g. "Zoo Capital Fund II Pte Ltd" not "200 Capital Fund II Pte Ltd")
 - For document_type: Use a concise descriptive title in Title Case. Strip prefixes like "Form of" or "Copy of"
 - For document_date: Convert any date format to YYYY-MM-DD. If only month and year, use the 1st of the month. If date is unclear, set to null.
+- For position_held: Only extract for ACRA officer change documents. Common values: "Director", "Secretary", "Auditor", "Managing Director", "Chief Executive Officer"
 - If a field cannot be determined, set it to null
 
 --- DOCUMENT TEXT ---
@@ -110,8 +117,14 @@ class DocumentMetadata:
     """Structured metadata extracted from a document."""
     company_name: str | None
     document_type: str | None
+    document_content: str | None  # Subject/purpose of the document
     document_date: str | None  # YYYY-MM-DD format
     confidence: str
+    # ACRA Change-of-Officers specific fields
+    position_held: str | None = None        # e.g. "Director", "Secretary", "Auditor"
+    has_cessation: bool = False              # True if cessation date/reason found
+    is_multi_entry: bool = False             # True if multiple entries e.g. [1/2] [2/2]
+    all_cessation: bool = False             # True if ALL entries are cessations (no appointment-only)
 
 
 def analyze_document(text: str) -> DocumentMetadata:
@@ -142,13 +155,19 @@ def analyze_document(text: str) -> DocumentMetadata:
         raw_response = response["message"]["content"].strip()
         logger.debug("Ollama raw response: %s", raw_response)
 
-        return _parse_response(raw_response)
+        metadata = _parse_response(raw_response)
+
+        # Supplement with OCR text-based detection for ACRA officer-change docs
+        _enrich_officer_change_fields(metadata, text)
+
+        return metadata
 
     except Exception:
         logger.exception("Ollama analysis failed")
         return DocumentMetadata(
             company_name=None,
             document_type=None,
+            document_content=None,
             document_date=None,
             confidence="low",
         )
@@ -178,6 +197,128 @@ def _normalize_date(date_str: str) -> str | None:
     return None
 
 
+def _to_bool(val) -> bool:
+    """Coerce various truthy representations to bool."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "yes", "1")
+    return bool(val)
+
+
+# ---------- ACRA officer-change OCR-based detection ----------
+
+_OFFICER_CHANGE_PATTERN = re.compile(
+    r"change\s+in\s+company\s+information.*?appointment.*?cessation.*?officer|auditor",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_POSITION_PATTERN = re.compile(
+    # ACRA two-column layout: "Position held" is a header, value is on the next line
+    # e.g.: "Position held        Date of Appointment\nSecretary       26/04/2024"
+    r"position\s+held\b[^\n]*\n\s*([A-Za-z][\w\s]*?)(?:\s{3,}|\t|\n|$)",
+    re.IGNORECASE,
+)
+
+_APPT_DATE_PATTERN = re.compile(
+    r"date\s+of\s+appointment\s*[:\-]?\s*(\S.+)",
+    re.IGNORECASE,
+)
+
+_CESS_DATE_PATTERN = re.compile(
+    r"date\s+of\s+cessation\s*[:\-]?\s*(\S.+)",
+    re.IGNORECASE,
+)
+
+_CESS_REASON_PATTERN = re.compile(
+    r"reason\s+(?:of|for)\s+cessation\s*[:\-]?\s*(\S.+)",
+    re.IGNORECASE,
+)
+
+_ENTRY_COUNT_PATTERN = re.compile(
+    r"\[(\d+)/(\d+)\]",
+)
+
+_CURRENT_ENTITY_PATTERN = re.compile(
+    r"current\s+entity\s+details",
+    re.IGNORECASE,
+)
+
+
+def _enrich_officer_change_fields(metadata: DocumentMetadata, ocr_text: str) -> None:
+    """Scan OCR text directly for ACRA officer-change fields.
+
+    This supplements the AI extraction with reliable regex-based detection,
+    since the AI may miss these structured fields.
+    Everything after "Current Entity Details" is ignored.
+    """
+    # Only apply to ACRA officer-change documents
+    is_officer_change = (
+        _OFFICER_CHANGE_PATTERN.search(ocr_text)
+        or (metadata.document_content and "appointment" in metadata.document_content.lower()
+            and "cessation" in metadata.document_content.lower())
+        or (metadata.document_type and "appointment" in metadata.document_type.lower()
+            and ("officer" in metadata.document_type.lower() or "auditor" in metadata.document_type.lower()))
+    )
+
+    if not is_officer_change:
+        return
+
+    logger.debug("Detected ACRA officer-change document — scanning OCR text for fields.")
+
+    # Strip everything after "Current Entity Details" — those fields are irrelevant
+    ced_match = _CURRENT_ENTITY_PATTERN.search(ocr_text)
+    scan_text = ocr_text[:ced_match.start()] if ced_match else ocr_text
+
+    # Position held — use only the first match from OCR (first entry is the primary change)
+    if not metadata.position_held or not isinstance(metadata.position_held, str):
+        m = _POSITION_PATTERN.search(scan_text)
+        if m:
+            position = m.group(1).strip().rstrip(".,;:")
+            position = re.sub(r"\s+", " ", position)
+            position = position.split("\n")[0].strip()
+            if len(position) <= 60:
+                metadata.position_held = position
+                logger.info("OCR detected position_held: '%s'", position)
+
+    # Date of Appointment
+    has_appt = bool(_APPT_DATE_PATTERN.search(scan_text))
+
+    # Count cessation dates and reasons across all entries
+    cess_date_count = len(_CESS_DATE_PATTERN.findall(scan_text))
+    cess_reason_count = len(_CESS_REASON_PATTERN.findall(scan_text))
+    has_cess_date = cess_date_count > 0
+    has_cess_reason = cess_reason_count > 0
+
+    # Multi-entry indicators [1/2], [2/2], etc.
+    entry_matches = _ENTRY_COUNT_PATTERN.findall(ocr_text)  # check full text for [x/y]
+    is_multi = False
+    entry_total = 1
+    if entry_matches:
+        entry_total = max(int(m[1]) for m in entry_matches)
+        is_multi = entry_total > 1
+
+    # Override AI results with OCR text results (OCR regex is more reliable here)
+    if has_cess_date and has_cess_reason:
+        metadata.has_cessation = True
+    if is_multi:
+        metadata.is_multi_entry = True
+
+    # All entries are cessations if every entry has a cessation date+reason
+    # (i.e. number of cessation occurrences >= number of entries)
+    if cess_date_count >= entry_total and cess_reason_count >= entry_total:
+        metadata.all_cessation = True
+
+    logger.info(
+        "ACRA officer-change fields — position: %s | appt_date: %s | "
+        "cess_date: %s (%d) | cess_reason: %s (%d) | entries: %d | "
+        "multi_entry: %s | all_cessation: %s",
+        metadata.position_held, has_appt,
+        has_cess_date, cess_date_count, has_cess_reason, cess_reason_count,
+        entry_total, metadata.is_multi_entry, metadata.all_cessation,
+    )
+
+
 def _parse_markdown_response(text: str) -> DocumentMetadata | None:
     """
     Fallback parser for when the model ignores the JSON instruction and
@@ -199,6 +340,7 @@ def _parse_markdown_response(text: str) -> DocumentMetadata | None:
     return DocumentMetadata(
         company_name=_fix_ocr_company_name(company),
         document_type=doc_type,
+        document_content=None,
         document_date=_normalize_date(raw_date) if raw_date else None,
         confidence=conf,
     )
@@ -230,12 +372,31 @@ def _parse_response(raw: str) -> DocumentMetadata:
             logger.warning("Parsed response as markdown (model ignored JSON instruction)")
             return md_result
         logger.error("Could not parse Ollama response: %s", raw[:300])
-        return DocumentMetadata(None, None, None, "low")
+        return DocumentMetadata(None, None, None, None, "low")
 
     raw_date = data.get("document_date")
+
+    # ACRA officer-change fields
+    position_held = data.get("position_held")
+    # AI may return a list of positions — use only the first one
+    if isinstance(position_held, list):
+        position_held = position_held[0] if position_held else None
+    has_appt = _to_bool(data.get("has_appointment_date"))
+    has_cess = _to_bool(data.get("has_cessation_date"))
+    has_cess_reason = _to_bool(data.get("has_cessation_reason"))
+    entry_count = data.get("entry_indicators")
+    is_multi = (isinstance(entry_count, (int, float)) and entry_count > 1)
+
+    # Cessation = has cessation date AND reason
+    has_cessation = has_cess and has_cess_reason
+
     return DocumentMetadata(
         company_name=_fix_ocr_company_name(data.get("company_name")),
         document_type=data.get("document_type"),
+        document_content=data.get("document_content"),
         document_date=_normalize_date(raw_date) if raw_date else None,
         confidence=data.get("confidence", "low"),
+        position_held=position_held,
+        has_cessation=has_cessation,
+        is_multi_entry=is_multi,
     )

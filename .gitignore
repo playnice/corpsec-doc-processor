@@ -1,3 +1,10 @@
 venv/
 __pycache__/
 .env
+
+# Runtime data folders
+data/Inbox/
+data/Renamed/
+data/Uploaded/
+data/Errors/
+data/Screenshots/
