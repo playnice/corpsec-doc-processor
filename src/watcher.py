@@ -1,9 +1,12 @@
 """
 Folder watcher module.
 Monitors the inbox folder for new PDF files and triggers the processing pipeline.
+Uses a thread-safe queue so that file processing always happens on the main thread
+(required by Playwright which uses greenlets and cannot switch threads).
 """
 
 import logging
+import queue
 import time
 from pathlib import Path
 from typing import Callable
@@ -17,15 +20,9 @@ logger = logging.getLogger(__name__)
 class PDFHandler(FileSystemEventHandler):
     """Handles new PDF files appearing in the watched folder."""
 
-    def __init__(self, callback: Callable[[Path], None], stable_seconds: float = 3.0):
-        """
-        Args:
-            callback: Function to call with the Path of each new PDF.
-            stable_seconds: Wait this long after creation to ensure the file
-                            is fully written (drag-and-drop may take time).
-        """
+    def __init__(self, file_queue: queue.Queue, stable_seconds: float = 3.0):
         super().__init__()
-        self.callback = callback
+        self._queue = file_queue
         self.stable_seconds = stable_seconds
 
     def on_created(self, event: FileCreatedEvent) -> None:
@@ -36,14 +33,8 @@ class PDFHandler(FileSystemEventHandler):
             return
 
         logger.info("New PDF detected: %s", path.name)
-
-        # Wait for the file to be fully written (stable file size)
         self._wait_until_stable(path)
-
-        try:
-            self.callback(path)
-        except Exception:
-            logger.exception("Error processing %s", path.name)
+        self._queue.put(path)
 
     def _wait_until_stable(self, path: Path) -> None:
         """Wait until the file size stops changing."""
@@ -60,21 +51,18 @@ class PDFHandler(FileSystemEventHandler):
             time.sleep(self.stable_seconds)
 
 
-def start_watching(folder: Path, callback: Callable[[Path], None]) -> Observer:
+def start_watching(folder: Path) -> tuple[Observer, queue.Queue]:
     """
     Start watching a folder for new PDF files.
 
-    Args:
-        folder: The directory to watch.
-        callback: Called with Path of each new PDF.
-
     Returns:
-        The Observer instance (call .stop() to shut down).
+        (observer, file_queue) — poll file_queue on the main thread.
     """
     folder.mkdir(parents=True, exist_ok=True)
-    handler = PDFHandler(callback)
+    file_queue: queue.Queue[Path] = queue.Queue()
+    handler = PDFHandler(file_queue)
     observer = Observer()
     observer.schedule(handler, str(folder), recursive=False)
     observer.start()
     logger.info("Watching folder: %s", folder)
-    return observer
+    return observer, file_queue

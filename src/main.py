@@ -17,11 +17,10 @@ Usage:
 
 import argparse
 import logging
+import queue
 import re
 import shutil
-import signal
 import sys
-import time
 from pathlib import Path
 
 import config
@@ -76,24 +75,47 @@ def prompt_mode() -> int:
 # ---------------------------------------------------------------------------
 
 # Pattern: "YYYYMMDD SHORTNAME - DocType" or "YYYYMMDD SHORTNAME-DocType"
-_FILENAME_PATTERN = re.compile(r"^\d{8}\s+([A-Z0-9]+(?:\s[A-Z0-9]+)*)\s*[-–—]")
+_FILENAME_PATTERN = re.compile(
+    r"^(\d{8})\s+([A-Z0-9]+(?:\s[A-Z0-9]+)*)\s*[-–—]\s*(.+)$"
+)
 
 
-def _parse_company_from_filename(stem: str) -> str | None:
-    """Extract company full name from a pre-renamed filename.
+def _parse_metadata_from_filename(stem: str):
+    """Parse all metadata from a pre-renamed filename.
 
-    Parses the short name (e.g. 'BXI') from 'YYYYMMDD BXI - DocType'
-    and looks it up in COMPANY_SHORT_NAMES to get the full name.
-    Returns None if the short name has no config mapping.
+    Format: 'YYYYMMDD SHORTNAME - DocType (extra info)'
+    Returns (company_full_name, doc_type, date_str) or (None, None, None).
     """
+    from ai_analyzer import DocumentMetadata
+
     m = _FILENAME_PATTERN.match(stem)
     if not m:
+        logger.warning("Could not parse filename: %s", stem)
         return None
-    short = m.group(1).strip()
-    full = config.get_company_full_name(short)
-    if full:
-        logger.info("Filename company: '%s' → '%s'", short, full)
-    return full
+
+    date_raw = m.group(1)        # e.g. "20221103"
+    short_name = m.group(2)      # e.g. "BXI"
+    doc_type = m.group(3).strip() # e.g. "Disclosure of Interest (Vincent)"
+
+    # Date: YYYYMMDD → YYYY-MM-DD
+    date_str = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:8]}"
+
+    # Company: look up full name from config
+    company = config.get_company_full_name(short_name)
+    if company:
+        logger.info("Filename → Company: '%s' → '%s'", short_name, company)
+    else:
+        logger.warning("Filename → Company short '%s' not in config", short_name)
+
+    logger.info("Filename → Type: '%s' | Date: %s", doc_type, date_str)
+
+    return DocumentMetadata(
+        company_name=company,
+        document_type=doc_type,
+        document_content=doc_type,
+        document_date=date_str,
+        confidence="high",
+    )
 
 
 def process_pdf(pdf_path: Path) -> None:
@@ -104,43 +126,41 @@ def process_pdf(pdf_path: Path) -> None:
     logger.info("Processing: %s", pdf_path.name)
 
     if processing_mode == MODE_UPLOAD_ONLY:
-        # File is already renamed — extract company short name from filename
-        # Expected format: "YYYYMMDD SHORTNAME - DocType.pdf" or "YYYYMMDD SHORTNAME-DocType.pdf"
-        company_from_filename = _parse_company_from_filename(pdf_path.stem)
+        # File is already renamed — parse ALL metadata from filename
+        # Format: "YYYYMMDD SHORTNAME - DocType.pdf"
+        filename_meta = _parse_metadata_from_filename(pdf_path.stem)
 
-        # Run OCR/AI for metadata (needed for upload fields) but skip rename
-        logger.info("[1] Extracting text...")
-        text = extract_text(pdf_path)
-        metadata = None
-        if text:
-            logger.info("Extracted %d characters of text.", len(text))
-            logger.info("[2] Analyzing with %s...", config.OLLAMA_MODEL)
-            metadata = analyze_document(text)
-            logger.info(
-                "Extracted — Company: %s | Type: %s | Content: %s | Date: %s",
-                metadata.company_name, metadata.document_type,
-                metadata.document_content, metadata.document_date,
-            )
+        if not filename_meta:
+            logger.error("Cannot parse filename — skipping: %s", pdf_path.name)
+            _move_to_errors(pdf_path)
+            return
 
-        # Override AI company with filename-derived company (more reliable for pre-renamed files)
-        if company_from_filename and metadata:
-            if metadata.company_name != company_from_filename:
-                logger.info(
-                    "Overriding AI company '%s' with filename company '%s'",
-                    metadata.company_name, company_from_filename,
-                )
-                metadata.company_name = company_from_filename
-        elif company_from_filename and not metadata:
-            from ai_analyzer import DocumentMetadata
-            metadata = DocumentMetadata(
-                company_name=company_from_filename,
-                document_type=None, document_content=None,
-                document_date=None, confidence="low",
-            )
+        metadata = filename_meta
 
-        if not metadata:
-            logger.warning("No text extracted — uploading without metadata.")
+        # Only run OCR + AI if company not resolved from config
+        if not metadata.company_name:
+            logger.info("[1] Extracting text for company detection...")
+            text = extract_text(pdf_path)
+            if text:
+                logger.info("Extracted %d characters of text.", len(text))
+                logger.info("[2] Analyzing with %s...", config.OLLAMA_MODEL)
+                ai_meta = analyze_document(text)
+                logger.info("AI company: %s", ai_meta.company_name)
+                if ai_meta.company_name:
+                    metadata.company_name = ai_meta.company_name
+
+        if not metadata.company_name:
+            logger.error("Could not determine company — skipping: %s", pdf_path.name)
+            _move_to_errors(pdf_path)
+            return
+
+        logger.info(
+            "Final metadata — Company: %s | Type: %s | Description: %s | Date: %s",
+            metadata.company_name, metadata.document_type,
+            metadata.document_content, metadata.document_date,
+        )
         _upload_and_move(pdf_path, metadata=metadata)
+        return
         return
 
     # Step 1: OCR / text extraction
@@ -277,17 +297,29 @@ def run_watch_mode() -> None:
         teamwork = TeamworkUploader()
 
     # Process any PDFs already sitting in the folder
-    existing = list(watch_folder.glob("*.pdf"))
+    existing = sorted(watch_folder.glob("*.pdf"))
     if existing:
         logger.info("Found %d existing PDF(s) — processing...", len(existing))
         for pdf in existing:
             process_pdf(pdf)
 
-    # Start watching for new files
-    observer = start_watching(watch_folder, process_pdf)
+    # Start watching for new files (queue-based, so processing stays on main thread)
+    observer, file_queue = start_watching(watch_folder)
 
-    # Graceful shutdown on Ctrl+C
-    def shutdown(signum, frame):
+    logger.info("Watching for new PDFs... (Ctrl+C to stop)")
+    try:
+        while True:
+            try:
+                pdf_path = file_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            try:
+                process_pdf(pdf_path)
+            except Exception:
+                logger.exception("Error processing %s", pdf_path.name)
+    except KeyboardInterrupt:
+        pass
+    finally:
         logger.info("Shutting down...")
         observer.stop()
         observer.join()
@@ -296,24 +328,6 @@ def run_watch_mode() -> None:
                 teamwork.close()
         except Exception:
             pass
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-
-    logger.info("Watching for new PDFs... (Ctrl+C to stop)")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        observer.stop()
-    observer.join()
-    try:
-        if teamwork:
-            teamwork.close()
-    except Exception:
-        pass
 
 
 def run_single_file(file_path: str) -> None:

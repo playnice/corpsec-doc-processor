@@ -220,12 +220,32 @@ def _strip_entity_suffixes(name: str) -> str:
     return " ".join(result.split()).strip()
 
 
-# Regex to find company-like names in OCR text: "XYZ PTE. LTD." / "XYZ PTE LTD"
+# Regex to find "COMPANY NAME PTE. LTD." patterns in OCR text.
+# Requires each word to start with uppercase (no IGNORECASE) and
+# uses word-boundary to avoid partial matches like "c/o".
 _COMPANY_NAME_PATTERN = re.compile(
-    r"([A-Z][A-Z0-9 &',\.\-]{2,}?)\s+"           # company name (all caps words)
-    r"(?:PTE|PRIVATE)\.?\s*(?:LTD|LIMITED)\.?",    # entity suffix
-    re.IGNORECASE,
+    r"(?<!\w)"                                          # not preceded by a word char
+    r"((?:[A-Z][A-Z0-9.&'\-]*\s+){1,8})"              # 1-8 uppercase words
+    r"(?:PTE|PRIVATE)\.?\s*(?:LTD|LIMITED)\.?"          # entity suffix
 )
+
+
+# Common English words that precede company names but aren't part of them
+_NOISE_PREFIXES = {
+    "THE", "OF", "IN", "FOR", "BY", "TO", "AND", "OR", "WITH", "AT", "ON",
+    "COMPANY", "INTEREST", "NAME", "ITS", "THEIR", "THIS", "THAT", "FROM",
+    "BETWEEN", "BEING", "SAID", "CALLED", "KNOWN", "AS", "IS", "WAS",
+    "SECRETARY", "DIRECTOR", "DIRECTORS", "MEMBER", "MEMBERS",
+    "PURSUANT", "SECTION", "UNDER", "HEREINAFTER", "ENTITLED",
+}
+
+
+def _clean_company_match(raw: str) -> str:
+    """Strip leading noise/generic words from a regex-captured company name."""
+    words = raw.strip().split()
+    while words and words[0].upper().rstrip(".,") in _NOISE_PREFIXES:
+        words.pop(0)
+    return " ".join(words).strip()
 
 
 def _validate_company_name(metadata: DocumentMetadata, ocr_text: str) -> None:
@@ -234,7 +254,7 @@ def _validate_company_name(metadata: DocumentMetadata, ocr_text: str) -> None:
     If the AI hallucinated a company name not found in the text, attempt to find
     the real company by:
       1. Checking known companies from COMPANY_SHORT_NAMES config
-      2. Extracting company names directly from OCR text via regex
+      2. Extracting company names directly from OCR text via regex (most frequent)
     """
     if not metadata.company_name:
         return
@@ -265,22 +285,33 @@ def _validate_company_name(metadata: DocumentMetadata, ocr_text: str) -> None:
                 metadata.company_name = corrected
                 return
 
-    # Strategy 2: Extract company name directly from OCR text via regex
-    matches = _COMPANY_NAME_PATTERN.findall(ocr_text)
-    if matches:
-        # Pick the first match that differs from the hallucinated name
-        for raw_match in matches:
-            candidate = raw_match.strip().rstrip(".,- ")
-            candidate_core = _strip_entity_suffixes(candidate)
-            if candidate_core and candidate_core != name_core:
-                # Re-attach entity suffix in Title Case
-                corrected = candidate.strip().title() + " Pte Ltd"
-                logger.info(
-                    "Corrected company: '%s' → '%s' (extracted from OCR text)",
-                    metadata.company_name, corrected,
-                )
-                metadata.company_name = corrected
-                return
+    # Strategy 2: Extract company names from OCR text via regex, pick most frequent
+    raw_matches = _COMPANY_NAME_PATTERN.findall(ocr_text)
+    if raw_matches:
+        from collections import Counter
+        counts: Counter[str] = Counter()
+        core_to_clean: dict[str, str] = {}
+        for raw_match in raw_matches:
+            cleaned = _clean_company_match(raw_match)
+            if not cleaned:
+                continue
+            cleaned_core = _strip_entity_suffixes(cleaned)
+            if cleaned_core and cleaned_core != name_core:
+                counts[cleaned_core] += 1
+                # Keep the longest cleaned form for display
+                if cleaned_core not in core_to_clean or len(cleaned) > len(core_to_clean[cleaned_core]):
+                    core_to_clean[cleaned_core] = cleaned
+
+        if counts:
+            best_core = counts.most_common(1)[0][0]
+            best_clean = core_to_clean[best_core]
+            corrected = best_clean.strip().title() + " Pte Ltd"
+            logger.info(
+                "Corrected company: '%s' → '%s' (most frequent in OCR text, %dx)",
+                metadata.company_name, corrected, counts[best_core],
+            )
+            metadata.company_name = corrected
+            return
 
     logger.warning("Could not find any company name in OCR text — keeping AI result.")
 
