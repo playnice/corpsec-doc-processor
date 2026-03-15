@@ -249,8 +249,11 @@ def run_watch_mode() -> None:
         logger.info("Shutting down...")
         observer.stop()
         observer.join()
-        if teamwork:
-            teamwork.close()
+        try:
+            if teamwork:
+                teamwork.close()
+        except Exception:
+            pass
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -261,10 +264,14 @@ def run_watch_mode() -> None:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        logger.info("Shutting down...")
         observer.stop()
     observer.join()
-    if teamwork:
-        teamwork.close()
+    try:
+        if teamwork:
+            teamwork.close()
+    except Exception:
+        pass
 
 
 def run_single_file(file_path: str) -> None:

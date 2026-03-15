@@ -101,18 +101,30 @@ class TeamworkUploader:
     def close(self) -> None:
         """Shut down the browser cleanly."""
         try:
+            if self._page:
+                self._page.close()
+        except Exception:
+            pass
+        try:
             if self._context:
                 self._context.close()
+        except Exception:
+            pass
+        try:
             if self._browser:
                 self._browser.close()
+        except Exception:
+            pass
+        try:
             if self._playwright:
                 self._playwright.stop()
         except Exception:
-            logger.debug("Error during browser cleanup", exc_info=True)
+            pass
         finally:
             self._page = None
             self._context = None
             self._browser = None
+            self._playwright = None
             self._playwright = None
             self._logged_in = False
 
