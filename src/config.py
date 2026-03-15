@@ -43,6 +43,8 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 COMPANY_SHORT_NAMES: dict[str, str] = {
     "zoo capital fund ii pte ltd": "ZCFII",
     "zoo capital fund ii pte. ltd.": "ZCFII",
+    "broad xiangshan investment pte ltd": "BXI",
+    "broad xiangshan investment pte. ltd.": "BXI",
     # Add more mappings as needed:
     # "acme holdings pte ltd": "ACME",
     # "global ventures sdn bhd": "GVSB",
@@ -82,3 +84,22 @@ def get_company_short_name(full_name: str) -> str:
         if word[0].isalpha() and word.lower().rstrip(".,") not in _ENTITY_SUFFIXES
     )
     return abbreviation if abbreviation else "UNKNOWN"
+
+
+def get_company_full_name(short_name: str) -> str | None:
+    """Reverse lookup: given a short name (e.g. 'BXI'), return the full company name.
+
+    Returns None if no mapping found.
+    """
+    upper = short_name.strip().upper()
+    _ROMAN = {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"}
+    for full, short in COMPANY_SHORT_NAMES.items():
+        if short.upper() == upper:
+            words = []
+            for w in full.split():
+                if w.upper() in _ROMAN:
+                    words.append(w.upper())
+                else:
+                    words.append(w.capitalize())
+            return " ".join(words)
+    return None

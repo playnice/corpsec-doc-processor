@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import logging
+import re
 import shutil
 import signal
 import sys
@@ -74,6 +75,25 @@ def prompt_mode() -> int:
 # Pipeline
 # ---------------------------------------------------------------------------
 
+# Pattern: "YYYYMMDD SHORTNAME - DocType" or "YYYYMMDD SHORTNAME-DocType"
+_FILENAME_PATTERN = re.compile(r"^\d{8}\s+([A-Z0-9]+(?:\s[A-Z0-9]+)*)\s*[-–—]")
+
+
+def _parse_company_from_filename(stem: str) -> str | None:
+    """Extract company full name from a pre-renamed filename.
+
+    Parses the short name (e.g. 'BXI') from 'YYYYMMDD BXI - DocType'
+    and looks it up in COMPANY_SHORT_NAMES to get the full name.
+    """
+    m = _FILENAME_PATTERN.match(stem)
+    if not m:
+        return None
+    short = m.group(1).strip()
+    full = config.get_company_full_name(short)
+    if full:
+        logger.info("Filename company: '%s' → '%s'", short, full)
+    return full
+
 
 def process_pdf(pdf_path: Path) -> None:
     """Full processing pipeline for a single PDF."""
@@ -83,6 +103,10 @@ def process_pdf(pdf_path: Path) -> None:
     logger.info("Processing: %s", pdf_path.name)
 
     if processing_mode == MODE_UPLOAD_ONLY:
+        # File is already renamed — extract company short name from filename
+        # Expected format: "YYYYMMDD SHORTNAME - DocType.pdf" or "YYYYMMDD SHORTNAME-DocType.pdf"
+        company_from_filename = _parse_company_from_filename(pdf_path.stem)
+
         # Run OCR/AI for metadata (needed for upload fields) but skip rename
         logger.info("[1] Extracting text...")
         text = extract_text(pdf_path)
@@ -96,7 +120,24 @@ def process_pdf(pdf_path: Path) -> None:
                 metadata.company_name, metadata.document_type,
                 metadata.document_content, metadata.document_date,
             )
-        else:
+
+        # Override AI company with filename-derived company (more reliable for pre-renamed files)
+        if company_from_filename and metadata:
+            if metadata.company_name != company_from_filename:
+                logger.info(
+                    "Overriding AI company '%s' with filename company '%s'",
+                    metadata.company_name, company_from_filename,
+                )
+                metadata.company_name = company_from_filename
+        elif company_from_filename and not metadata:
+            from ai_analyzer import DocumentMetadata
+            metadata = DocumentMetadata(
+                company_name=company_from_filename,
+                document_type=None, document_content=None,
+                document_date=None, confidence="low",
+            )
+
+        if not metadata:
             logger.warning("No text extracted — uploading without metadata.")
         _upload_and_move(pdf_path, metadata=metadata)
         return

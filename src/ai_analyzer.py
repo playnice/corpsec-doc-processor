@@ -157,6 +157,9 @@ def analyze_document(text: str) -> DocumentMetadata:
 
         metadata = _parse_response(raw_response)
 
+        # Validate: check if AI company name actually appears in the OCR text
+        _validate_company_name(metadata, text)
+
         # Supplement with OCR text-based detection for ACRA officer-change docs
         _enrich_officer_change_fields(metadata, text)
 
@@ -204,6 +207,56 @@ def _to_bool(val) -> bool:
     if isinstance(val, str):
         return val.strip().lower() in ("true", "yes", "1")
     return bool(val)
+
+
+# ---------- Company name validation ----------
+
+def _validate_company_name(metadata: DocumentMetadata, ocr_text: str) -> None:
+    """Verify the AI-extracted company name actually appears in the OCR text.
+
+    If the AI hallucinated a company name not found in the text, attempt to find
+    the real company by checking known companies from COMPANY_SHORT_NAMES.
+    """
+    if not metadata.company_name:
+        return
+
+    text_lower = ocr_text.lower()
+    # Strip entity suffixes for a more flexible check
+    name_core = metadata.company_name.lower()
+    for suffix in ("pte", "ltd", "pte.", "ltd.", "sdn", "bhd", "limited", "private"):
+        name_core = name_core.replace(suffix, "")
+    name_core = " ".join(name_core.split()).strip()
+
+    if name_core and name_core in text_lower:
+        return  # AI name is present in OCR text — all good
+
+    logger.warning(
+        "AI company name '%s' NOT found in OCR text — likely hallucinated.",
+        metadata.company_name,
+    )
+
+    # Try to find a known company in the OCR text
+    for full_name in config.COMPANY_SHORT_NAMES:
+        # Strip entity suffixes from the known name for matching
+        known_core = full_name
+        for suffix in ("pte", "ltd", "pte.", "ltd.", "sdn", "bhd", "limited", "private"):
+            known_core = known_core.replace(suffix, "")
+        known_core = " ".join(known_core.split()).strip()
+
+        if known_core and known_core in text_lower:
+            # Capitalize properly
+            corrected = config.get_company_full_name(
+                config.get_company_short_name(full_name)
+            )
+            if corrected:
+                logger.info(
+                    "Corrected company: '%s' → '%s' (found in OCR text)",
+                    metadata.company_name, corrected,
+                )
+                metadata.company_name = corrected
+                return
+
+    logger.warning("Could not find any known company in OCR text — keeping AI result.")
 
 
 # ---------- ACRA officer-change OCR-based detection ----------
