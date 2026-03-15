@@ -213,9 +213,13 @@ def run_watch_mode() -> None:
     global processing_mode, teamwork
 
     processing_mode = prompt_mode()
+
+    # Upload-only watches the Renamed folder; other modes watch Inbox
+    watch_folder = config.RENAMED_FOLDER if processing_mode == MODE_UPLOAD_ONLY else config.WATCH_FOLDER
+
     logger.info("Starting CorpSec Document Processor — Watch Mode")
     logger.info("Mode: %s", MODE_LABELS[processing_mode])
-    logger.info("Inbox folder: %s", config.WATCH_FOLDER)
+    logger.info("Watch folder: %s", watch_folder)
     logger.info("Renamed folder: %s", config.RENAMED_FOLDER)
     logger.info("Uploaded folder: %s", config.UPLOADED_FOLDER)
     logger.info("Ollama model: %s", config.OLLAMA_MODEL)
@@ -231,14 +235,14 @@ def run_watch_mode() -> None:
         teamwork = TeamworkUploader()
 
     # Process any PDFs already sitting in the folder
-    existing = list(config.WATCH_FOLDER.glob("*.pdf"))
+    existing = list(watch_folder.glob("*.pdf"))
     if existing:
         logger.info("Found %d existing PDF(s) — processing...", len(existing))
         for pdf in existing:
             process_pdf(pdf)
 
     # Start watching for new files
-    observer = start_watching(config.WATCH_FOLDER, process_pdf)
+    observer = start_watching(watch_folder, process_pdf)
 
     # Graceful shutdown on Ctrl+C
     def shutdown(signum, frame):
