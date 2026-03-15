@@ -211,21 +211,36 @@ def _to_bool(val) -> bool:
 
 # ---------- Company name validation ----------
 
+def _strip_entity_suffixes(name: str) -> str:
+    """Remove common entity suffixes (Pte, Ltd, etc.) and normalise whitespace."""
+    result = name.lower()
+    for suffix in ("pte", "ltd", "pte.", "ltd.", "sdn", "bhd",
+                    "sdn.", "bhd.", "limited", "private"):
+        result = result.replace(suffix, "")
+    return " ".join(result.split()).strip()
+
+
+# Regex to find company-like names in OCR text: "XYZ PTE. LTD." / "XYZ PTE LTD"
+_COMPANY_NAME_PATTERN = re.compile(
+    r"([A-Z][A-Z0-9 &',\.\-]{2,}?)\s+"           # company name (all caps words)
+    r"(?:PTE|PRIVATE)\.?\s*(?:LTD|LIMITED)\.?",    # entity suffix
+    re.IGNORECASE,
+)
+
+
 def _validate_company_name(metadata: DocumentMetadata, ocr_text: str) -> None:
     """Verify the AI-extracted company name actually appears in the OCR text.
 
     If the AI hallucinated a company name not found in the text, attempt to find
-    the real company by checking known companies from COMPANY_SHORT_NAMES.
+    the real company by:
+      1. Checking known companies from COMPANY_SHORT_NAMES config
+      2. Extracting company names directly from OCR text via regex
     """
     if not metadata.company_name:
         return
 
     text_lower = ocr_text.lower()
-    # Strip entity suffixes for a more flexible check
-    name_core = metadata.company_name.lower()
-    for suffix in ("pte", "ltd", "pte.", "ltd.", "sdn", "bhd", "limited", "private"):
-        name_core = name_core.replace(suffix, "")
-    name_core = " ".join(name_core.split()).strip()
+    name_core = _strip_entity_suffixes(metadata.company_name)
 
     if name_core and name_core in text_lower:
         return  # AI name is present in OCR text — all good
@@ -235,28 +250,39 @@ def _validate_company_name(metadata: DocumentMetadata, ocr_text: str) -> None:
         metadata.company_name,
     )
 
-    # Try to find a known company in the OCR text
+    # Strategy 1: Try to find a known company from config in the OCR text
     for full_name in config.COMPANY_SHORT_NAMES:
-        # Strip entity suffixes from the known name for matching
-        known_core = full_name
-        for suffix in ("pte", "ltd", "pte.", "ltd.", "sdn", "bhd", "limited", "private"):
-            known_core = known_core.replace(suffix, "")
-        known_core = " ".join(known_core.split()).strip()
-
+        known_core = _strip_entity_suffixes(full_name)
         if known_core and known_core in text_lower:
-            # Capitalize properly
             corrected = config.get_company_full_name(
                 config.get_company_short_name(full_name)
             )
             if corrected:
                 logger.info(
-                    "Corrected company: '%s' → '%s' (found in OCR text)",
+                    "Corrected company: '%s' → '%s' (config match in OCR text)",
                     metadata.company_name, corrected,
                 )
                 metadata.company_name = corrected
                 return
 
-    logger.warning("Could not find any known company in OCR text — keeping AI result.")
+    # Strategy 2: Extract company name directly from OCR text via regex
+    matches = _COMPANY_NAME_PATTERN.findall(ocr_text)
+    if matches:
+        # Pick the first match that differs from the hallucinated name
+        for raw_match in matches:
+            candidate = raw_match.strip().rstrip(".,- ")
+            candidate_core = _strip_entity_suffixes(candidate)
+            if candidate_core and candidate_core != name_core:
+                # Re-attach entity suffix in Title Case
+                corrected = candidate.strip().title() + " Pte Ltd"
+                logger.info(
+                    "Corrected company: '%s' → '%s' (extracted from OCR text)",
+                    metadata.company_name, corrected,
+                )
+                metadata.company_name = corrected
+                return
+
+    logger.warning("Could not find any company name in OCR text — keeping AI result.")
 
 
 # ---------- ACRA officer-change OCR-based detection ----------

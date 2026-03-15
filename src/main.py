@@ -84,6 +84,7 @@ def _parse_company_from_filename(stem: str) -> str | None:
 
     Parses the short name (e.g. 'BXI') from 'YYYYMMDD BXI - DocType'
     and looks it up in COMPANY_SHORT_NAMES to get the full name.
+    Returns None if the short name has no config mapping.
     """
     m = _FILENAME_PATTERN.match(stem)
     if not m:
