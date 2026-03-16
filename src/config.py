@@ -41,6 +41,8 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # The AI will attempt to match extracted company names to these entries.
 # Keys should be lowercase for case-insensitive matching.
 COMPANY_SHORT_NAMES: dict[str, str] = {
+    "zoo capital ii (singapore) pte ltd": "ZCII",
+    "zoo capital ii (singapore) pte. ltd.": "ZCII",
     "zoo capital fund ii pte ltd": "ZCFII",
     "zoo capital fund ii pte. ltd.": "ZCFII",
     "broad xiangshan investment pte ltd": "BXI",
