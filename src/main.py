@@ -27,6 +27,7 @@ import config
 from ocr_engine import extract_text
 from ai_analyzer import analyze_document
 from renamer import rename_pdf
+from pdf_splitter import split_pdf
 from teamwork_uploader import TeamworkUploader
 from watcher import start_watching
 
@@ -48,6 +49,7 @@ logger = logging.getLogger("corpsec")
 MODE_RENAME_ONLY = 1
 MODE_RENAME_AND_UPLOAD = 2
 MODE_UPLOAD_ONLY = 3
+MODE_SPLIT_PDF = 4
 
 processing_mode: int = MODE_RENAME_ONLY
 teamwork: TeamworkUploader | None = None
@@ -62,13 +64,14 @@ def prompt_mode() -> int:
     print("  1. Rename Only")
     print("  2. Rename & Upload to Teamwork")
     print("  3. Upload to Teamwork Only")
+    print("  4. Split Combined PDF")
     print("=" * 50)
 
     while True:
-        choice = input("\n  Enter choice (1/2/3): ").strip()
-        if choice in ("1", "2", "3"):
+        choice = input("\n  Enter choice (1/2/3/4): ").strip()
+        if choice in ("1", "2", "3", "4"):
             return int(choice)
-        print("  Invalid choice. Please enter 1, 2, or 3.")
+        print("  Invalid choice. Please enter 1, 2, 3, or 4.")
 
 # ---------------------------------------------------------------------------
 # Pipeline
@@ -125,6 +128,26 @@ def process_pdf(pdf_path: Path) -> None:
     logger.info("=" * 60)
     logger.info("Processing: %s", pdf_path.name)
 
+    # --- Mode 4: Split Combined PDF ---
+    if processing_mode == MODE_SPLIT_PDF:
+        logger.info("[Split] Splitting combined PDF: %s", pdf_path.name)
+        created = split_pdf(pdf_path, output_folder=config.RENAMED_FOLDER)
+        if created:
+            logger.info("Split into %d file(s) → %s", len(created), config.RENAMED_FOLDER)
+            # Move original to Uploaded folder to indicate it's been processed
+            config.UPLOADED_FOLDER.mkdir(parents=True, exist_ok=True)
+            dest = config.UPLOADED_FOLDER / pdf_path.name
+            try:
+                shutil.move(str(pdf_path), str(dest))
+                logger.info("Original moved to: %s", dest)
+            except OSError:
+                logger.exception("Could not move original file")
+        else:
+            logger.error("Split failed — moving to errors.")
+            _move_to_errors(pdf_path)
+        logger.info("=" * 60)
+        return
+
     if processing_mode == MODE_UPLOAD_ONLY:
         # File is already renamed — parse ALL metadata from filename
         # Format: "YYYYMMDD SHORTNAME - DocType.pdf"
@@ -160,7 +183,6 @@ def process_pdf(pdf_path: Path) -> None:
             metadata.document_content, metadata.document_date,
         )
         _upload_and_move(pdf_path, metadata=metadata)
-        return
         return
 
     # Step 1: OCR / text extraction
@@ -267,6 +289,7 @@ MODE_LABELS = {
     MODE_RENAME_ONLY: "Rename Only",
     MODE_RENAME_AND_UPLOAD: "Rename & Upload to Teamwork",
     MODE_UPLOAD_ONLY: "Upload to Teamwork Only",
+    MODE_SPLIT_PDF: "Split Combined PDF",
 }
 
 
@@ -276,8 +299,13 @@ def run_watch_mode() -> None:
 
     processing_mode = prompt_mode()
 
-    # Upload-only watches the Renamed folder; other modes watch Inbox
-    watch_folder = config.RENAMED_FOLDER if processing_mode == MODE_UPLOAD_ONLY else config.WATCH_FOLDER
+    # Upload-only watches Renamed folder; Split watches Errors folder; others watch Inbox
+    if processing_mode == MODE_UPLOAD_ONLY:
+        watch_folder = config.RENAMED_FOLDER
+    elif processing_mode == MODE_SPLIT_PDF:
+        watch_folder = config.ERROR_FOLDER
+    else:
+        watch_folder = config.WATCH_FOLDER
 
     logger.info("Starting CorpSec Document Processor — Watch Mode")
     logger.info("Mode: %s", MODE_LABELS[processing_mode])
