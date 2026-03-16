@@ -299,11 +299,9 @@ def run_watch_mode() -> None:
 
     processing_mode = prompt_mode()
 
-    # Upload-only watches Renamed folder; Split watches Errors folder; others watch Inbox
+    # Upload-only watches Renamed folder; others watch Inbox
     if processing_mode == MODE_UPLOAD_ONLY:
         watch_folder = config.RENAMED_FOLDER
-    elif processing_mode == MODE_SPLIT_PDF:
-        watch_folder = config.ERROR_FOLDER
     else:
         watch_folder = config.WATCH_FOLDER
 
