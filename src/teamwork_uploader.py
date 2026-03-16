@@ -296,10 +296,7 @@ class TeamworkUploader:
             ).first
             files_tab.click(timeout=ACTION_TIMEOUT)
             page.wait_for_load_state("networkidle")
-            # Wait for tab content (Upload button) to render
-            page.locator('a:has-text("Upload"), button:has-text("Upload")').first.wait_for(
-                state="visible", timeout=ACTION_TIMEOUT
-            )
+            time.sleep(1)
             logger.info("[Step 6] Files tab opened.")
             return True
 
@@ -855,8 +852,13 @@ class TeamworkUploader:
         try:
             self._screenshots_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
-            path = self._screenshots_dir / f"{ts}_{label}.png"
-            self._page.screenshot(path=str(path), full_page=True)
-            logger.info("Screenshot saved: %s", path)
+            # Save screenshot
+            png_path = self._screenshots_dir / f"{ts}_{label}.png"
+            self._page.screenshot(path=str(png_path), full_page=True)
+            logger.info("Screenshot saved: %s", png_path)
+            # Save page HTML for debugging
+            html_path = self._screenshots_dir / f"{ts}_{label}.html"
+            html_path.write_text(self._page.content(), encoding="utf-8")
+            logger.info("HTML saved: %s", html_path)
         except Exception:
-            logger.debug("Could not save screenshot", exc_info=True)
+            logger.debug("Could not save debug artifacts", exc_info=True)
