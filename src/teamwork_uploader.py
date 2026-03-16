@@ -229,21 +229,14 @@ class TeamworkUploader:
             search_box = page.locator('#datatable_filter input[type="search"]').first
             search_box.click(timeout=ACTION_TIMEOUT)
             search_box.fill(search_term)
-            # Wait for DataTables to filter and show at least one row
-            try:
-                page.locator('#datatable tbody tr').first.wait_for(
-                    state="visible", timeout=ACTION_TIMEOUT
-                )
-            except PwTimeout:
-                pass  # Will be caught by the "no rows" check below
+            # DataTables filters on keyup/input — fill() doesn't fire these,
+            # so dispatch an input event to trigger the filter
+            search_box.dispatch_event("input")
+            # Wait for the table to re-render with filtered results
+            time.sleep(2)
 
             # Step 5: Find the matching row and click its View button
             logger.info("[Step 5] Looking for matching company row...")
-
-            # Wait for rows that contain a View button (skip "No matching records" row)
-            page.locator('#datatable tbody tr a[href*="view_company"]').first.wait_for(
-                state="visible", timeout=ACTION_TIMEOUT
-            )
 
             # Find all visible rows in the datatable
             rows = page.locator('#datatable tbody tr').all()
@@ -252,16 +245,12 @@ class TeamworkUploader:
                 self._save_screenshot("step5_no_rows")
                 return False
 
-            def _normalize(s: str) -> str:
+            def _norm(s: str) -> str:
                 """Strip dots and extra whitespace for fuzzy comparison."""
                 return " ".join(s.replace(".", "").lower().split())
 
             # Find the best matching row by company name text
             target_row = None
-            # Normalize: strip dots so "Pte Ltd" matches "PTE. LTD."
-            def _norm(s: str) -> str:
-                return " ".join(s.replace(".", "").lower().split())
-
             norm_company = _norm(company_name)
             norm_search = _norm(search_term)
             for row in rows:
@@ -271,17 +260,9 @@ class TeamworkUploader:
                     break
 
             if not target_row:
-                # Fallback: use the first row that has a View button
-                for row in rows:
-                    if row.locator('a[href*="view_company"]').count() > 0:
-                        logger.warning("No exact match found, using first result row.")
-                        target_row = row
-                        break
-
-            if not target_row:
-                logger.error("No actionable rows in search results.")
-                self._save_screenshot("step5_no_rows")
-                return False
+                # Fallback: just use the first row
+                logger.warning("No exact match found, using first result row.")
+                target_row = rows[0]
 
             # Click the View button within this specific row
             view_btn = target_row.locator('a[href*="view_company"]').first
