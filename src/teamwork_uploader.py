@@ -459,7 +459,6 @@ class TeamworkUploader:
                 }
             """, formatted)
 
-            logger.info("[Step 10] JS result: %s", result)
             return True
 
         except Exception as exc:
@@ -605,7 +604,6 @@ class TeamworkUploader:
                 }
             """, unique_values)
 
-            logger.info("[Step 11] JS result: %s", result)
             return True
 
         except Exception as exc:
@@ -669,7 +667,6 @@ class TeamworkUploader:
                     return info;
                 }
             """)
-            logger.info("[Step 12] Save/Back elements found: %s", save_area_html)
 
             # Broad selector: any clickable element with "Save" text
             candidates = page.locator(
@@ -680,7 +677,6 @@ class TeamworkUploader:
                 '[role="button"]:has-text("Save")'
             ).all()
 
-            logger.info("[Step 12] Found %d Save candidates", len(candidates))
             clicked = False
             for i, btn in enumerate(candidates):
                 try:
@@ -688,15 +684,12 @@ class TeamworkUploader:
                     text = (btn.text_content() or "").strip()[:30]
                     cls = btn.get_attribute("class") or ""
                     href = btn.get_attribute("href") or ""
-                    logger.info("  Save candidate[%d] <%s> text='%s' class='%s' href='%s'",
-                                i, tag, text, cls[:60], href[:60])
 
                     btn.scroll_into_view_if_needed(timeout=3000)
                     time.sleep(0.3)
                     if btn.is_visible():
                         btn.click(timeout=ACTION_TIMEOUT)
                         clicked = True
-                        logger.info("  → Clicked candidate[%d]", i)
                         break
                 except Exception as e:
                     logger.info("  → candidate[%d] not clickable: %s", i, str(e)[:80])
@@ -872,6 +865,8 @@ class TeamworkUploader:
                 # (keyword_in_filename, category_value, prefix_to_strip_from_desc)
                 ("ACRA", "24", "ACRA-"),   # ACRA Lodgements
                 ("DRIW", "11", "DRIW-"),   # Directors' Written Resolution/ Minutes of BODM
+                ("FORM", "28", "FORM-"),   # Statutory forms
+                ("CERT", "25", "CERT-"),   # Share Certificates
             ]
             for keyword, cat_value, strip_prefix in _KEYWORD_RULES:
                 if keyword in fname:

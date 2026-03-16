@@ -2,8 +2,9 @@
 PDF Splitter module.
 Splits combined/multi-document scanned PDFs into individual documents.
 
-Uses per-page OCR + Ollama AI to identify document boundaries,
-then splits using PyMuPDF and names each output file using Entity List CSV.
+Uses per-page OCR + heuristic pattern matching on resolution headers to
+identify document boundaries, then splits using PyMuPDF and names each
+output file using Entity List CSV.
 """
 
 import io
@@ -78,7 +79,316 @@ def _ocr_pages(pdf_path: Path, dpi: int = 200) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# AI document-boundary detection
+# Heuristic boundary detection (regex-based, primary method)
+# ---------------------------------------------------------------------------
+
+# Resolution header pattern — handles OCR artifacts (Æ for ', * for ')
+_RESOLUTION_RE = re.compile(
+    r"DIRECTOR.{0,6}S?.{0,6}\s+RESOLUTION.{0,6}S?\s+IN\s+WRITING",
+    re.IGNORECASE,
+)
+
+# Continuation page indicator (e.g. "Page 2 of 4", "Page 3")
+_PAGE_NUM_RE = re.compile(r"\bPage\s+(\d+)\b", re.IGNORECASE)
+
+# Pages that are always continuations (supporting docs, not new resolutions)
+_CONTINUATION_START_RE = re.compile(
+    r"^(?:SCHEDULE\b|This\s+is\s+the\s+Schedule|APPLICATION\s+FOR\s+SHARE|"
+    r"WRITTEN\s+NOTICE\s+OF\s+DIRECTOR|Signature\s+Page|"
+    r"First\s+Board\s+Resolutions?)",
+    re.IGNORECASE,
+)
+
+# Company name — first line containing PTE LTD / LIMITED etc.
+# Only search the first ~200 chars (first few lines) to avoid matching bank names
+_COMPANY_RE = re.compile(
+    r"^(.+?(?:PTE\.?\s*LTD\.?|PRIVATE\s+LIMITED))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Action keywords that appear in subject lines
+_ACTION_KEYWORDS = [
+    "APPOINTMENT", "ALLOTMENT", "ISSUANCE", "DECLARATION",
+    "OPENING", "CONVENING", "INCORPORATION", "CHANGE",
+    "AUTHORITY", "RESIGNATION", "AGM", "ANNUAL GENERAL",
+    "APPROVAL", "REGISTERED OFFICE", "FINANCIAL YEAR",
+    "BANK ACCOUNT", "ALTERNATE DIRECTOR", "AUDITOR",
+    "NOTICE OF RESOLUTION", "LETTER OF AUTHORITY",
+]
+
+# Lines that are NOT subjects (boilerplate in resolution headers)
+_BOILERPLATE_RE = re.compile(
+    r"^(?:DIRECTOR.{0,10}RESOLUTION|"  # "Directors' Resolution(s)..." header line
+    r"PURSUANT|CONSTITUTION|THE\s+COMPAN|COMPAN[YÆ']|"
+    r"INCORPORATED|REPUBLIC\s+OF|REGISTRATION|RESOLVED|THAT\s+|"
+    r"DATE\s*[:\-]|Page\s+\d|Signature\s+Page|Company\s+No)",
+    re.IGNORECASE,
+)
+
+# Month abbreviation → number
+_MONTH_MAP = {
+    "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04",
+    "MAY": "05", "JUN": "06", "JUL": "07", "AUG": "08",
+    "SEP": "09", "OCT": "10", "NOV": "11", "DEC": "12",
+    "JANUARY": "01", "FEBRUARY": "02", "MARCH": "03", "APRIL": "04",
+    "JUNE": "06", "JULY": "07", "AUGUST": "08", "SEPTEMBER": "09",
+    "OCTOBER": "10", "NOVEMBER": "11", "DECEMBER": "12",
+}
+
+# Subject normalization: raw OCR subject → clean document type
+_SUBJECT_NORMALIZATIONS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"APPOINTMENT\s+OF\s+ALTERNATE\s+DIRECTOR", re.I), "Appointment of Alternate Director"),
+    (re.compile(r"APPOINTMENT\s+OF\s+AUDITOR", re.I), "Appointment of Auditors"),
+    (re.compile(r"APPOINTMENT\s+OF\s+(?:DATA\s+PROTECTION\s+OFFICER|DPO)", re.I), "Appointment of DPO"),
+    (re.compile(r"APPOINTMENT\s+OF\s+DIRECTOR", re.I), "Appointment of Directors"),
+    (re.compile(r"ALLOTMENT\s+(?:AND\s+ISSUANCE\s+)?OF\b.*?SHARES", re.I), "Allotment of Shares"),
+    (re.compile(r"DECLARATION\s+OF\s+INTERESTS", re.I), "Declaration of Interests"),
+    (re.compile(r"OPENING\s+OF\s+BANK\s+ACCOUNT.*?(?:UNITED\s+OVERSEAS|UOB)", re.I), "Opening of Bank Account (UOB)"),
+    (re.compile(r"OPENING\s+OF\s+BANK\s+ACCOUNT.*?DBS", re.I), "Opening of Bank Account (DBS)"),
+    (re.compile(r"OPENING\s+OF\s+BANK\s+ACCOUNT.*?(?:SILICON\s+VALLEY|SVB)", re.I), "Opening of Bank Account (SVB)"),
+    (re.compile(r"OPENING\s+OF\s+BANK\s+ACCOUNT.*?OCBC", re.I), "Opening of Bank Account (OCBC)"),
+    (re.compile(r"OPENING\s+OF\s+BANK\s+ACCOUNT", re.I), "Opening of Bank Account"),
+    (re.compile(r"CONVENING\s+AN?\s+E(?:XTRA)?\.?\s*O(?:RDINARY)?\.?\s*G(?:ENERAL)?\.?\s*M(?:EETING)?", re.I), "Convening an EGM"),
+    (re.compile(r"INCORPORATION", re.I), "Incorporation"),
+    (re.compile(r"REGISTERED\s+OFFICE", re.I), "Registered Office"),
+    (re.compile(r"CHANGE\s+OF\s+SECRETARY", re.I), "Change of Secretary"),
+    (re.compile(r"CHANGE\s+OF\s+DIRECTOR", re.I), "Change of Director"),
+    (re.compile(r"CHANGE\s+OF\s+R\.?O\.?\s+ADDRESS", re.I), "Change of RO Address"),
+    (re.compile(r"CHANGE\s+OF\s+BANK\s+SIGNATOR", re.I), "Change of Bank Signatories"),
+    (re.compile(r"AUTHORITY\s+TO\s+ISSUE\s+SHARES", re.I), "Authority to Issue Shares"),
+    (re.compile(r"RESIGNATION\s+OF\s+SECRETARY", re.I), "Resignation of Secretary"),
+    (re.compile(r"RESIGNATION\s+OF\s+DIRECTOR", re.I), "Resignation of Director"),
+    (re.compile(r"APPROVAL\s+(?:AND\s+ADOPTION\s+)?OF\s+.*?FINANCIAL\s+STATEMENTS", re.I), "Approval of Financial Statements"),
+    (re.compile(r"LETTER\s+OF\s+AUTHORITY", re.I), "Letter of Authority"),
+    (re.compile(r"AGM|ANNUAL\s+GENERAL\s+MEETING", re.I), "AGM"),
+]
+
+
+def _extract_company_name(text: str) -> str | None:
+    """Extract company name from the first few lines of page text."""
+    # Flatten first ~300 chars to handle names split across lines by OCR
+    header = " ".join(text[:300].split())
+    m = re.search(
+        r"([A-Z][\w\s.,&'()\-]+?(?:PTE[.,]?\s*LTD[.,]?|PRIVATE\s+LIMITED))",
+        header,
+        re.IGNORECASE,
+    )
+    if m:
+        name = m.group(1).strip().rstrip(",.")
+        # Clean OCR artifacts
+        name = name.replace("Æ", "'").replace("ô", "'").replace("ö", "'")
+        return name
+    return None
+
+
+def _is_subject_line(line: str) -> bool:
+    """Check if a line looks like a resolution subject (action-like, mostly caps)."""
+    if len(line) < 8:
+        return False
+    if _BOILERPLATE_RE.match(line):
+        return False
+    # Exclude address lines and labels
+    if re.search(
+        r"Street|Singapore\s+\d|Office\s*:\s*\d|#\d{2}-\d{2}|"
+        r"^Registered\s+Office\s*:|Schedule\s+referred\s+to|"
+        r"pertaining\s+to\s+the\s+Opening",
+        line, re.IGNORECASE,
+    ):
+        return False
+    # Must contain an action keyword
+    line_upper = line.upper()
+    return any(kw in line_upper for kw in _ACTION_KEYWORDS)
+
+
+def _extract_raw_subject(text: str) -> str | None:
+    """Extract the raw subject line from a resolution page.
+
+    Scans lines in the header area for action keywords.
+    Handles both formats: subject before RESOLVED and subject after RESOLVED.
+    """
+    for line in text[:1000].split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if _is_subject_line(line):
+            # Strip leading numbering like "1." or "1,"
+            cleaned = re.sub(r"^\d+[.,]\s*", "", line)
+            return cleaned if cleaned else line
+    return None
+
+
+def _normalize_subject(raw: str) -> str:
+    """Normalize a raw OCR subject to a standard document type name."""
+    for pattern, normalized in _SUBJECT_NORMALIZATIONS:
+        if pattern.search(raw):
+            return normalized
+    # Fallback: title case
+    return raw.strip().title()
+
+
+def _subjects_match(subj1: str, subj2: str) -> bool:
+    """Check if two raw subjects are the same resolution (multi-page continuation)."""
+    n1 = _normalize_subject(subj1)
+    n2 = _normalize_subject(subj2)
+    return n1 == n2
+
+
+def _extract_date_from_text(text: str) -> str | None:
+    """Extract a date from page text (DD-MMM-YYYY, DD MMM YYYY, MM/DD/YYYY)."""
+    # Pattern: "Date[d]: DD-MMM-YYYY" or "DD MMM YYYY" near Date keyword
+    m = re.search(
+        r"[Dd]ate[d]?\s*[:;=]?\s*[-–]?\s*(\d{1,2})\s*[-/\s]*"
+        r"([A-Za-z]{3,9})\s*[-/,\s]*(\d{4})",
+        text,
+    )
+    if m:
+        day = m.group(1).zfill(2)
+        month_str = m.group(2).upper()
+        # Handle full month names and abbreviations
+        month = _MONTH_MAP.get(month_str[:3])
+        year = m.group(3)
+        if month and 1 <= int(day) <= 31:
+            return f"{year}-{month}-{day}"
+
+    # Pattern: "Dated: DD MMM YYYY" without explicit "Date:" prefix
+    m = re.search(
+        r"[Dd]ated\s*[:\s]*(\d{1,2})\s*([A-Za-z]{3,9})\s*(\d{4})",
+        text,
+    )
+    if m:
+        day = m.group(1).zfill(2)
+        month = _MONTH_MAP.get(m.group(2).upper()[:3])
+        year = m.group(3)
+        if month and 1 <= int(day) <= 31:
+            return f"{year}-{month}-{day}"
+
+    # Pattern: M/DD/YYYY (US-style from bank transfers)
+    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    if m:
+        month = m.group(1).zfill(2)
+        day = m.group(2).zfill(2)
+        year = m.group(3)
+        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+            return f"{year}-{month}-{day}"
+
+    return None
+
+
+def _find_date_in_range(page_texts: list[str], start: int, end: int) -> str | None:
+    """Search pages (0-indexed) from last to first for a resolution date."""
+    for i in range(end, start - 1, -1):
+        date = _extract_date_from_text(page_texts[i])
+        if date:
+            return date
+    return None
+
+
+def _detect_boundaries_heuristic(
+    page_texts: list[str], doc_prefix: str = "DRIW",
+) -> list[DocumentSegment]:
+    """Detect document boundaries using regex patterns on resolution headers.
+
+    More reliable than AI for structured corporate secretary documents.
+    """
+    page_count = len(page_texts)
+    # Classify each page: (is_new_doc, raw_subject, company_name)
+    boundaries: list[tuple[int, str, str | None]] = []  # (page_idx, subject, company)
+    prev_norm_subject: str | None = None
+    prev_raw_subject: str | None = None
+
+    for i, text in enumerate(page_texts):
+        header = text[:1000]
+
+        # Skip known continuation page patterns (schedules, applications, etc.)
+        first_line = header.split("\n", 1)[0].strip()
+        if _CONTINUATION_START_RE.match(first_line):
+            continue
+
+        # Skip pages with "Page N" (N > 1) in header — continuation pages
+        pn = _PAGE_NUM_RE.search(header[:300])
+        if pn and int(pn.group(1)) > 1:
+            continue
+
+        has_resolution = bool(_RESOLUTION_RE.search(header))
+        raw_subject = _extract_raw_subject(header) if has_resolution else None
+
+        if has_resolution and raw_subject:
+            norm = _normalize_subject(raw_subject)
+            # New boundary if subject type OR raw wording changed (e.g. two
+            # "Allotment of Shares" with different share counts)
+            if norm != prev_norm_subject or raw_subject != prev_raw_subject:
+                company = _extract_company_name(header)
+                boundaries.append((i, raw_subject, company))
+                prev_norm_subject = norm
+                prev_raw_subject = raw_subject
+            # Same subject as previous → multi-page resolution (continuation)
+            continue
+
+        # Check for non-resolution document starts (e.g. Letter of Authority)
+        # Only check first few lines — body text deeper in the page must NOT
+        # trigger a false boundary.
+        if not has_resolution:
+            non_res_subject = _extract_raw_subject(text[:300])
+            if non_res_subject:
+                company = _extract_company_name(text)
+                prev_company = boundaries[-1][2] if boundaries else None
+                if company and prev_company and not _companies_match(company, prev_company):
+                    boundaries.append((i, non_res_subject, company))
+                    prev_norm_subject = _normalize_subject(non_res_subject)
+
+    if not boundaries:
+        return []
+
+    # Build segments from boundaries
+    segments: list[DocumentSegment] = []
+    for idx, (page_idx, raw_subject, company) in enumerate(boundaries):
+        # End page is one before the next boundary, or last page
+        if idx + 1 < len(boundaries):
+            end_page = boundaries[idx + 1][0]  # 0-indexed of next boundary
+        else:
+            end_page = page_count  # last boundary extends to end
+
+        # Convert to 1-based
+        start_1 = page_idx + 1
+        end_1 = end_page if idx + 1 < len(boundaries) else page_count
+
+        # Find date within this segment's pages
+        date = _find_date_in_range(page_texts, page_idx, end_1 - 1)
+
+        norm_subject = _normalize_subject(raw_subject)
+        doc_type = f"{doc_prefix}-{norm_subject}" if doc_prefix else norm_subject
+
+        segments.append(DocumentSegment(
+            page_start=start_1,
+            page_end=end_1,
+            company_name=company,
+            document_type=_normalize_doc_type(doc_type),
+            document_date=date,
+        ))
+
+    return segments
+
+
+def _companies_match(name1: str, name2: str) -> bool:
+    """Check if two company names refer to the same entity (fuzzy match)."""
+    def norm(n: str) -> str:
+        n = re.sub(r"[^a-z\s]", "", n.lower())
+        n = re.sub(r"\b(pte|ltd|limited|private|investment)\b", "", n)
+        return re.sub(r"\s+", " ", n).strip()
+    return norm(name1) == norm(name2)
+
+
+def _extract_doc_prefix_from_filename(filename: str) -> str:
+    """Extract document prefix (DRIW, ACRA, etc.) from the PDF filename."""
+    upper = filename.upper()
+    for prefix in ("DRIW", "ACRA", "MRIW"):
+        if prefix in upper:
+            return prefix
+    return "DRIW"  # default for corporate resolutions
+
+
+# ---------------------------------------------------------------------------
+# AI fallback boundary detection (for non-standard documents)
 # ---------------------------------------------------------------------------
 
 _SPLIT_PROMPT = """You are analyzing a {page_count}-page scanned PDF containing multiple corporate documents combined together. Below is OCR text from each page.
@@ -121,7 +431,6 @@ Constraints:
 
 def _extract_json_array(raw: str) -> str | None:
     """Extract a JSON array from the AI response, repairing truncation if needed."""
-    # Try exact match first
     m = re.search(r"\[.*\]", raw, re.DOTALL)
     if m:
         return m.group()
@@ -132,7 +441,6 @@ def _extract_json_array(raw: str) -> str | None:
         return None
 
     text = raw[m.start():]
-    # Find the last complete JSON object (ending with '}')
     last_brace = text.rfind("}")
     if last_brace == -1:
         return None
@@ -147,12 +455,7 @@ def _extract_json_array(raw: str) -> str | None:
 
 
 def _build_page_text_block(page_texts: list[str], max_chars_per_page: int = 500) -> str:
-    """Format per-page texts for the AI prompt.
-
-    Includes the start (headers/titles) and end (dates/signatures) of each page.
-    For large documents (>20 pages), reduces per-page text to fit model context.
-    """
-    # Scale down per-page text for large docs to avoid exceeding model output limit
+    """Format per-page texts for the AI prompt."""
     if len(page_texts) > 25:
         max_chars_per_page = 300
     elif len(page_texts) > 15:
@@ -163,7 +466,6 @@ def _build_page_text_block(page_texts: list[str], max_chars_per_page: int = 500)
         if len(text) <= max_chars_per_page:
             content = text
         else:
-            # Show start (headers) and end (dates/signatures)
             tail = min(200, max_chars_per_page // 2)
             head = max_chars_per_page - tail
             content = text[:head] + "\n...\n" + text[-tail:]
@@ -171,8 +473,8 @@ def _build_page_text_block(page_texts: list[str], max_chars_per_page: int = 500)
     return "\n\n".join(parts)
 
 
-def _detect_boundaries(page_texts: list[str]) -> list[DocumentSegment]:
-    """Send page texts to Ollama to identify document boundaries."""
+def _detect_boundaries_ai(page_texts: list[str]) -> list[DocumentSegment]:
+    """AI fallback: send page texts to Ollama for boundary detection."""
     page_block = _build_page_text_block(page_texts)
     prompt = _SPLIT_PROMPT.format(
         page_count=len(page_texts),
@@ -192,7 +494,6 @@ def _detect_boundaries(page_texts: list[str]) -> list[DocumentSegment]:
         logger.exception("Ollama request failed")
         return []
 
-    # Parse JSON from response (handle markdown code blocks and truncation)
     json_text = _extract_json_array(raw)
     if not json_text:
         logger.error("AI response does not contain a JSON array:\n%s", raw[:500])
@@ -214,36 +515,16 @@ def _detect_boundaries(page_texts: list[str]) -> list[DocumentSegment]:
             document_type=_normalize_doc_type(item.get("document_type")),
             document_date=_normalize_date(item.get("document_date")),
         )
-        # Clamp to actual page count
         seg.page_start = max(1, min(seg.page_start, page_count))
         seg.page_end = max(1, min(seg.page_end, page_count))
         segments.append(seg)
 
-    # Sort by page_start
     segments.sort(key=lambda s: s.page_start)
 
-    # Validate: no gaps, no overlaps
-    # Fix last segment to cover remaining pages
     if segments and segments[-1].page_end < page_count:
-        logger.warning(
-            "Last segment ends at page %d but PDF has %d pages — extending.",
-            segments[-1].page_end, page_count,
-        )
         segments[-1].page_end = page_count
 
-    # Remove segments that are fully beyond the page count (hallucinated)
     segments = [s for s in segments if s.page_start <= page_count]
-
-    for i, seg in enumerate(segments):
-        if seg.page_start < 1 or seg.page_end < seg.page_start:
-            logger.warning("Invalid segment: pages %d-%d", seg.page_start, seg.page_end)
-        if i > 0 and seg.page_start != segments[i - 1].page_end + 1:
-            logger.warning(
-                "Page gap/overlap between segments %d-%d and %d-%d",
-                segments[i - 1].page_start, segments[i - 1].page_end,
-                seg.page_start, seg.page_end,
-            )
-
     return segments
 
 
@@ -255,7 +536,8 @@ def _normalize_doc_type(doc_type: str | None) -> str | None:
     # Words that should stay lowercase (unless first word)
     _LOWERCASE_WORDS = {"of", "the", "in", "for", "and", "or", "to", "a", "an"}
     # Acronyms/codes that should stay uppercase
-    _UPPERCASE_WORDS = {"AGM", "EGM", "ACRA", "DRIW", "FY", "BODM", "DPO"}
+    _UPPERCASE_WORDS = {"AGM", "EGM", "ACRA", "DRIW", "FY", "BODM", "DPO",
+                        "UOB", "DBS", "SVB", "OCBC", "RO"}
 
     # Split on first dash to preserve prefix like "DRIW-"
     if "-" in doc_type:
@@ -264,11 +546,14 @@ def _normalize_doc_type(doc_type: str | None) -> str | None:
         parts = rest.split()
         titled = []
         for i, word in enumerate(parts):
-            upper = word.upper()
-            if re.match(r"^FY\d", word, re.IGNORECASE):
-                titled.append(upper)
+            # Strip parentheses for checking, preserve them in output
+            core = word.strip("()")
+            upper = core.upper()
+            if re.match(r"^FY\d", core, re.IGNORECASE):
+                titled.append(word.upper())
             elif upper in _UPPERCASE_WORDS:
-                titled.append(upper)
+                # Reconstruct with original parentheses but uppercase core
+                titled.append(word.replace(core, upper))
             elif word.lower() in _LOWERCASE_WORDS and i > 0:
                 titled.append(word.lower())
             elif word.isupper() and len(word) > 1:
@@ -393,7 +678,7 @@ def _interactive_review(
     Returns updated segments list, or None if cancelled.
     """
     print("\n" + "=" * 70)
-    print("  AI-detected document segments (review before splitting)")
+    print("  Detected document segments (review before splitting)")
     print("=" * 70)
 
     for i, seg in enumerate(segments):
@@ -557,15 +842,22 @@ def split_pdf(pdf_path: Path, output_folder: Path | None = None) -> list[Path]:
         preview = text[:80].replace("\n", " ")
         logger.debug("  Page %d (%d chars): %s", i + 1, len(text), preview)
 
-    # Step 2: AI boundary detection
-    logger.info("[Split 2] Detecting document boundaries with AI...")
-    segments = _detect_boundaries(page_texts)
+    # Step 2: Heuristic boundary detection (primary) with AI fallback
+    doc_prefix = _extract_doc_prefix_from_filename(pdf_path.name)
+    logger.info("[Split 2] Detecting document boundaries (heuristic)...")
+    segments = _detect_boundaries_heuristic(page_texts, doc_prefix)
+
+    if len(segments) < 2:
+        logger.info("[Split 2] Heuristic found %d segment(s) — trying AI fallback...",
+                     len(segments))
+        segments = _detect_boundaries_ai(page_texts)
 
     if not segments:
-        logger.error("AI could not identify any document segments.")
+        logger.error("Could not identify any document segments.")
         return []
 
-    logger.info("[Split 2] Detected %d document(s):", len(segments))
+    method = "heuristic" if len(segments) >= 2 else "AI"
+    logger.info("[Split 2] Detected %d document(s) via %s:", len(segments), method)
     for i, seg in enumerate(segments):
         logger.info(
             "  %d. Pages %d-%d | %s | %s | %s",
