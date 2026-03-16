@@ -83,50 +83,90 @@ def _ocr_pages(pdf_path: Path, dpi: int = 200) -> list[str]:
 
 _SPLIT_PROMPT = """You are analyzing a {page_count}-page scanned PDF containing multiple corporate documents combined together. Below is OCR text from each page.
 
-Your task: identify where each SEPARATE document begins.
+Your task: identify where each SEPARATE document begins and ends.
 
 RULES:
 - A new document starts ONLY when a page has a NEW "Directors' Resolution In Writing" (DRIW) with a DIFFERENT subject/topic than the previous one.
-- Supporting pages after a resolution (application forms, bank transfers, subscription agreements, signature pages) are ALL part of that same resolution — NOT separate documents.
-- Two consecutive pages about the same topic (e.g., both about "Allotment of Shares") are the SAME document, even if both have company letterheads.
+- Supporting pages after a resolution (application forms, bank transfers, subscription agreements, signature pages, notices, letters of authority) are ALL part of that same resolution — NOT separate documents.
+- Two consecutive pages about the same topic are the SAME document, even if both have company letterheads.
 - The entire PDF has exactly {page_count} pages. Do NOT reference pages beyond {page_count}.
 
-EXAMPLE: A 21-page PDF might contain:
-- Pages 1-2: DRIW about AGM (Annual General Meeting)
-- Pages 3-11: DRIW about Allotment of Shares (includes resolution + application form + bank transfer + subscription agreement + signatures)
-- Pages 12-21: Another DRIW about Allotment of Shares with a different date (includes resolution + application form + bank transfer + subscription agreement + signatures)
-= 3 documents total
+COMMON DOCUMENT TYPES (use exactly the subject from the resolution heading):
+- "DRIW-Appointment of Alternate Director"
+- "DRIW-Appointment of Auditors"
+- "DRIW-Allotment of Shares" (includes application forms, bank transfers, subscription agreements)
+- "DRIW-Declaration of Interests" (includes banking resolutions, specimen signatures)
+- "DRIW-Opening of Bank Account" (specify which bank if mentioned)
+- "DRIW-Convening an EGM"
+- "DRIW-Incorporation" (first board resolutions)
+- "DRIW-AGM FYyyyy-mm" (Annual General Meeting — ONLY if AGM is explicitly mentioned)
+- Or any other subject directly from the resolution heading
 
 {page_texts}
 
 For each document, provide:
 - page_start / page_end (1-based, inclusive)
 - company_name: full legal name from letterhead
-- document_type: use format "DRIW-[Subject]". For AGM use "DRIW-AGM FYyyyy-mm" with the actual financial year end.
-- document_date: the RESOLUTION date (look for "Date: ..." near signatures), NOT the financial year end. Format YYYY-MM-DD.
+- document_type: use format "DRIW-[Subject from resolution heading]"
+- document_date: the RESOLUTION date (look for "Date: ..." or "Dated ..." near signatures), NOT financial year end. Format YYYY-MM-DD. If unclear, use null.
 
 Return ONLY a JSON array:
-[{{"page_start": 1, "page_end": 2, "company_name": "...", "document_type": "DRIW-AGM FY2021-12", "document_date": "2022-06-30"}}, ...]
+[{{"page_start": 1, "page_end": 3, "company_name": "...", "document_type": "DRIW-Appointment of Alternate Director", "document_date": "2021-12-27"}}, ...]
 
 Constraints:
 - First segment starts at page 1, last segment ends at page {page_count}
 - No gaps or overlaps between segments
-- Expect 2-5 documents total"""
+- Return ONLY the JSON array, no other text"""
+
+
+def _extract_json_array(raw: str) -> str | None:
+    """Extract a JSON array from the AI response, repairing truncation if needed."""
+    # Try exact match first
+    m = re.search(r"\[.*\]", raw, re.DOTALL)
+    if m:
+        return m.group()
+
+    # Response may be truncated (no closing ']'). Try to repair.
+    m = re.search(r"\[", raw)
+    if not m:
+        return None
+
+    text = raw[m.start():]
+    # Find the last complete JSON object (ending with '}')
+    last_brace = text.rfind("}")
+    if last_brace == -1:
+        return None
+
+    repaired = text[: last_brace + 1].rstrip().rstrip(",") + "\n]"
+    try:
+        json.loads(repaired)
+        logger.warning("Repaired truncated JSON array (%d chars recovered)", len(repaired))
+        return repaired
+    except json.JSONDecodeError:
+        return None
 
 
 def _build_page_text_block(page_texts: list[str], max_chars_per_page: int = 500) -> str:
     """Format per-page texts for the AI prompt.
 
     Includes the start (headers/titles) and end (dates/signatures) of each page.
+    For large documents (>20 pages), reduces per-page text to fit model context.
     """
+    # Scale down per-page text for large docs to avoid exceeding model output limit
+    if len(page_texts) > 25:
+        max_chars_per_page = 300
+    elif len(page_texts) > 15:
+        max_chars_per_page = 400
+
     parts = []
     for i, text in enumerate(page_texts):
         if len(text) <= max_chars_per_page:
             content = text
         else:
             # Show start (headers) and end (dates/signatures)
-            head = max_chars_per_page - 200
-            content = text[:head] + "\n...\n" + text[-200:]
+            tail = min(200, max_chars_per_page // 2)
+            head = max_chars_per_page - tail
+            content = text[:head] + "\n...\n" + text[-tail:]
         parts.append(f"--- PAGE {i + 1} ---\n{content}")
     return "\n\n".join(parts)
 
@@ -145,21 +185,21 @@ def _detect_boundaries(page_texts: list[str]) -> list[DocumentSegment]:
         response = ollama_client.chat(
             model=config.OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.1},
+            options={"temperature": 0.1, "num_predict": 4096},
         )
         raw = response["message"]["content"].strip()
     except Exception:
         logger.exception("Ollama request failed")
         return []
 
-    # Parse JSON from response (handle markdown code blocks)
-    json_match = re.search(r"\[.*\]", raw, re.DOTALL)
-    if not json_match:
+    # Parse JSON from response (handle markdown code blocks and truncation)
+    json_text = _extract_json_array(raw)
+    if not json_text:
         logger.error("AI response does not contain a JSON array:\n%s", raw[:500])
         return []
 
     try:
-        segments_raw = json.loads(json_match.group())
+        segments_raw = json.loads(json_text)
     except json.JSONDecodeError:
         logger.exception("Failed to parse AI JSON response:\n%s", raw[:500])
         return []
