@@ -31,6 +31,7 @@ from playwright.sync_api import (
     sync_playwright, Browser, BrowserContext, Page,
     TimeoutError as PwTimeout,
 )
+from playwright._impl._errors import TargetClosedError
 
 import config
 from ai_analyzer import DocumentMetadata
@@ -160,7 +161,6 @@ class TeamworkUploader:
             # Wait for dashboard
             page.wait_for_url("**/dashboard**", timeout=NAV_TIMEOUT)
             logger.info("[Step 0] Login successful — reached dashboard.")
-            self._save_screenshot("step0_dashboard")
             self._logged_in = True
             return True
 
@@ -193,7 +193,8 @@ class TeamworkUploader:
                 'a:has-text("Records")'
             ).first
             records_link.click(timeout=ACTION_TIMEOUT)
-            time.sleep(1)
+            # Wait for sub-menu to expand
+            page.locator('a:has-text("Companies")').first.wait_for(state="visible", timeout=ACTION_TIMEOUT)
 
             # Step 3: Click "Companies" sub-menu item
             logger.info("[Step 3] Clicking Companies...")
@@ -203,7 +204,6 @@ class TeamworkUploader:
             companies_link.click(timeout=ACTION_TIMEOUT)
             page.wait_for_load_state("networkidle")
             logger.info("[Step 3] Navigated to Companies listing.")
-            self._save_screenshot("step3_companies")
             return True
 
         except PwTimeout:
@@ -229,12 +229,21 @@ class TeamworkUploader:
             search_box = page.locator('#datatable_filter input[type="search"]').first
             search_box.click(timeout=ACTION_TIMEOUT)
             search_box.fill(search_term)
-            # DataTables filters on keyup, wait for table to re-render
-            time.sleep(2)
-            self._save_screenshot("step4_search_results")
+            # Wait for DataTables to filter and show at least one row
+            try:
+                page.locator('#datatable tbody tr').first.wait_for(
+                    state="visible", timeout=ACTION_TIMEOUT
+                )
+            except PwTimeout:
+                pass  # Will be caught by the "no rows" check below
 
             # Step 5: Find the matching row and click its View button
             logger.info("[Step 5] Looking for matching company row...")
+
+            # Wait for rows that contain a View button (skip "No matching records" row)
+            page.locator('#datatable tbody tr a[href*="view_company"]').first.wait_for(
+                state="visible", timeout=ACTION_TIMEOUT
+            )
 
             # Find all visible rows in the datatable
             rows = page.locator('#datatable tbody tr').all()
@@ -242,6 +251,10 @@ class TeamworkUploader:
                 logger.error("No rows found in search results.")
                 self._save_screenshot("step5_no_rows")
                 return False
+
+            def _normalize(s: str) -> str:
+                """Strip dots and extra whitespace for fuzzy comparison."""
+                return " ".join(s.replace(".", "").lower().split())
 
             # Find the best matching row by company name text
             target_row = None
@@ -258,16 +271,23 @@ class TeamworkUploader:
                     break
 
             if not target_row:
-                # Fallback: just use the first row
-                logger.warning("No exact match found, using first result row.")
-                target_row = rows[0]
+                # Fallback: use the first row that has a View button
+                for row in rows:
+                    if row.locator('a[href*="view_company"]').count() > 0:
+                        logger.warning("No exact match found, using first result row.")
+                        target_row = row
+                        break
+
+            if not target_row:
+                logger.error("No actionable rows in search results.")
+                self._save_screenshot("step5_no_rows")
+                return False
 
             # Click the View button within this specific row
             view_btn = target_row.locator('a[href*="view_company"]').first
             view_btn.click(timeout=ACTION_TIMEOUT)
             page.wait_for_load_state("networkidle")
             logger.info("[Step 5] Opened company profile.")
-            self._save_screenshot("step5_company_profile")
             return True
 
         except PwTimeout:
@@ -295,9 +315,11 @@ class TeamworkUploader:
             ).first
             files_tab.click(timeout=ACTION_TIMEOUT)
             page.wait_for_load_state("networkidle")
-            time.sleep(1)
+            # Wait for tab content (Upload button) to render
+            page.locator('a:has-text("Upload"), button:has-text("Upload")').first.wait_for(
+                state="visible", timeout=ACTION_TIMEOUT
+            )
             logger.info("[Step 6] Files tab opened.")
-            self._save_screenshot("step6_files_tab")
             return True
 
         except PwTimeout:
@@ -326,9 +348,7 @@ class TeamworkUploader:
                 if btn.is_visible():
                     btn.click(timeout=ACTION_TIMEOUT)
                     page.wait_for_load_state("networkidle")
-                    time.sleep(1)
                     logger.info("[Step 7] Upload form opened.")
-                    self._save_screenshot("step7_upload_form")
                     return True
 
             logger.error("No visible Upload button found.")
@@ -365,14 +385,11 @@ class TeamworkUploader:
                 ).first
                 if drop_zone.is_visible(timeout=3000):
                     drop_zone.click()
-                    time.sleep(1)
 
             # Set the file (works even if the input is hidden)
             file_input = page.locator('input[type="file"]').first
             file_input.set_input_files(str(file_path), timeout=ACTION_TIMEOUT)
-            time.sleep(2)
             logger.info("[Step 8] File selected.")
-            self._save_screenshot("step8_file_selected")
             return True
 
         except PwTimeout:
@@ -465,8 +482,6 @@ class TeamworkUploader:
             """, formatted)
 
             logger.info("[Step 10] JS result: %s", result)
-            time.sleep(0.5)
-            self._save_screenshot("step10_date_filled")
             return True
 
         except Exception as exc:
@@ -592,8 +607,6 @@ class TeamworkUploader:
             """, values)
 
             logger.info("[Step 11] JS result: %s", result)
-            time.sleep(0.5)
-            self._save_screenshot("step11_category_selected")
             return True
 
         except Exception as exc:
@@ -628,12 +641,9 @@ class TeamworkUploader:
                     try { document.activeElement.blur(); } catch(e) {}
                 }
             """)
-            time.sleep(0.5)
 
             # Scroll to the bottom so Save button becomes visible
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(0.5)
-            self._save_screenshot("step12_before_save")
 
             # Dump nearby HTML for debugging
             save_area_html = page.evaluate("""
@@ -720,7 +730,6 @@ class TeamworkUploader:
 
             # Wait for save to complete
             page.wait_for_load_state("networkidle", timeout=UPLOAD_TIMEOUT)
-            time.sleep(2)
 
             # Check for success
             success = page.locator(
@@ -729,7 +738,6 @@ class TeamworkUploader:
             ).first
             if success.is_visible(timeout=5000):
                 logger.info("[Step 12] Upload saved successfully!")
-                self._save_screenshot("step12_success")
                 return True
 
             # Check for errors
@@ -783,6 +791,24 @@ class TeamworkUploader:
             logger.warning("Teamwork.sg not configured — skipping upload.")
             return False
 
+        try:
+            return self._do_upload(file_path, metadata)
+        except TargetClosedError:
+            logger.warning("Browser session lost — relaunching...")
+            self.close()
+            self._logged_in = False
+            try:
+                return self._do_upload(file_path, metadata)
+            except Exception:
+                logger.exception("Upload failed after browser relaunch")
+                return False
+        except Exception:
+            logger.exception("Unexpected error during upload workflow")
+            self._save_screenshot("workflow_error")
+            return False
+
+    def _do_upload(self, file_path: Path, metadata: DocumentMetadata | None) -> bool:
+        """Internal upload implementation."""
         company_name = metadata.company_name if metadata else None
         if not company_name:
             logger.error("No company name — cannot upload without knowing the company.")
@@ -830,6 +856,8 @@ class TeamworkUploader:
             # Step 12: Save
             return self._click_save()
 
+        except TargetClosedError:
+            raise  # Let caller handle browser recovery
         except Exception:
             logger.exception("Unexpected error during upload workflow")
             self._save_screenshot("workflow_error")
