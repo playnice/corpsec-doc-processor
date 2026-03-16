@@ -706,8 +706,10 @@ class TeamworkUploader:
                 self._save_screenshot("step12_no_save_btn")
                 return False
 
-            # Wait for save to complete
+            # Wait for save to complete — the server uploads the file
+            # and redirects to the file listing or shows a success message
             page.wait_for_load_state("networkidle", timeout=UPLOAD_TIMEOUT)
+            time.sleep(3)  # Extra wait for server-side processing
 
             # Check for success
             success = page.locator(
@@ -716,6 +718,7 @@ class TeamworkUploader:
             ).first
             if success.is_visible(timeout=5000):
                 logger.info("[Step 12] Upload saved successfully!")
+                self._navigate_to_dashboard()
                 return True
 
             # Check for errors
@@ -724,17 +727,36 @@ class TeamworkUploader:
                 error_text = error.text_content() or "Unknown error"
                 logger.error("[Step 12] Save error: %s", error_text[:200])
                 self._save_screenshot("step12_save_error")
+                self._navigate_to_dashboard()
                 return False
 
             # No clear indicator — assume success
             logger.warning("[Step 12] Save completed (no explicit confirmation).")
-            self._save_screenshot("step12_no_confirmation")
+            self._navigate_to_dashboard()
             return True
 
         except PwTimeout:
             logger.error("[Step 12] Save timed out.")
             self._save_screenshot("step12_save_timeout")
             return False
+
+    # ------------------------------------------------------------------
+    # Post-upload: Navigate back to dashboard
+    # ------------------------------------------------------------------
+
+    def _navigate_to_dashboard(self) -> None:
+        """Navigate back to dashboard so the browser is in a clean state
+        for the next upload. This also ensures any pending server-side
+        upload processing has time to complete before the file is moved."""
+        page = self._page
+        if not page:
+            return
+        try:
+            page.goto("https://login.teamwork.sg/mainadmin/dashboard",
+                       wait_until="networkidle", timeout=NAV_TIMEOUT)
+            logger.info("Navigated back to dashboard.")
+        except Exception:
+            logger.debug("Could not navigate to dashboard", exc_info=True)
 
     # ------------------------------------------------------------------
     # Public API
