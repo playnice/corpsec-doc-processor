@@ -4,6 +4,7 @@ __pycache__/
 
 # Runtime data folders
 data/Inbox/
+data/Split/
 data/Renamed/
 data/Uploaded/
 data/Errors/

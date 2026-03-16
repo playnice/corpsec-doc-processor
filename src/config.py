@@ -18,6 +18,7 @@ _DATA_DIR = _PROJECT_ROOT / "data"
 load_dotenv(_PROJECT_ROOT / ".env")
 
 WATCH_FOLDER = _DATA_DIR / "Inbox"
+SPLIT_FOLDER = _DATA_DIR / "Split"
 RENAMED_FOLDER = _DATA_DIR / "Renamed"
 UPLOADED_FOLDER = _DATA_DIR / "Uploaded"
 ERROR_FOLDER = _DATA_DIR / "Errors"

@@ -299,9 +299,11 @@ def run_watch_mode() -> None:
 
     processing_mode = prompt_mode()
 
-    # Upload-only watches Renamed folder; others watch Inbox
+    # Upload-only watches Renamed folder; Split watches Split folder; others watch Inbox
     if processing_mode == MODE_UPLOAD_ONLY:
         watch_folder = config.RENAMED_FOLDER
+    elif processing_mode == MODE_SPLIT_PDF:
+        watch_folder = config.SPLIT_FOLDER
     else:
         watch_folder = config.WATCH_FOLDER
 
@@ -314,6 +316,7 @@ def run_watch_mode() -> None:
 
     # Ensure folders exist
     config.WATCH_FOLDER.mkdir(parents=True, exist_ok=True)
+    config.SPLIT_FOLDER.mkdir(parents=True, exist_ok=True)
     config.RENAMED_FOLDER.mkdir(parents=True, exist_ok=True)
     config.UPLOADED_FOLDER.mkdir(parents=True, exist_ok=True)
     config.ERROR_FOLDER.mkdir(parents=True, exist_ok=True)
