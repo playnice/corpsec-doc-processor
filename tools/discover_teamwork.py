@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("discover")
 
-OUTPUT_DIR = _PROJECT_ROOT / "data" / "Screenshots" / "discovery"
+OUTPUT_DIR = _PROJECT_ROOT / "debug" / "Screenshots" / "discovery"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 

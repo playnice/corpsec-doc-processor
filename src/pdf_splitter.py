@@ -171,7 +171,7 @@ def _detect_boundaries(page_texts: list[str]) -> list[DocumentSegment]:
             page_start=int(item.get("page_start", 0)),
             page_end=int(item.get("page_end", 0)),
             company_name=item.get("company_name"),
-            document_type=item.get("document_type"),
+            document_type=_normalize_doc_type(item.get("document_type")),
             document_date=_normalize_date(item.get("document_date")),
         )
         # Clamp to actual page count
@@ -205,6 +205,39 @@ def _detect_boundaries(page_texts: list[str]) -> list[DocumentSegment]:
             )
 
     return segments
+
+
+def _normalize_doc_type(doc_type: str | None) -> str | None:
+    """Normalize document type to Title Case, preserving known prefixes/codes."""
+    if not doc_type:
+        return None
+
+    # Words that should stay lowercase (unless first word)
+    _LOWERCASE_WORDS = {"of", "the", "in", "for", "and", "or", "to", "a", "an"}
+    # Acronyms/codes that should stay uppercase
+    _UPPERCASE_WORDS = {"AGM", "EGM", "ACRA", "DRIW", "FY", "BODM", "DPO"}
+
+    # Split on first dash to preserve prefix like "DRIW-"
+    if "-" in doc_type:
+        prefix, rest = doc_type.split("-", 1)
+        prefix = prefix.upper()
+        parts = rest.split()
+        titled = []
+        for i, word in enumerate(parts):
+            upper = word.upper()
+            if re.match(r"^FY\d", word, re.IGNORECASE):
+                titled.append(upper)
+            elif upper in _UPPERCASE_WORDS:
+                titled.append(upper)
+            elif word.lower() in _LOWERCASE_WORDS and i > 0:
+                titled.append(word.lower())
+            elif word.isupper() and len(word) > 1:
+                titled.append(word.title())
+            else:
+                titled.append(word)
+        return f"{prefix}-{' '.join(titled)}"
+
+    return doc_type
 
 
 def _normalize_date(date_str: str | None) -> str | None:
