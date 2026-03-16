@@ -245,11 +245,15 @@ class TeamworkUploader:
 
             # Find the best matching row by company name text
             target_row = None
-            company_lower = company_name.lower()
-            search_lower = search_term.lower()
+            # Normalize: strip dots so "Pte Ltd" matches "PTE. LTD."
+            def _norm(s: str) -> str:
+                return " ".join(s.replace(".", "").lower().split())
+
+            norm_company = _norm(company_name)
+            norm_search = _norm(search_term)
             for row in rows:
-                row_text = (row.text_content() or "").lower()
-                if company_lower in row_text or search_lower in row_text:
+                row_text = _norm(row.text_content() or "")
+                if norm_company in row_text or norm_search in row_text:
                     target_row = row
                     break
 
