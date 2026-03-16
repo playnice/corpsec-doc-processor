@@ -7,4 +7,6 @@ data/Inbox/
 data/Renamed/
 data/Uploaded/
 data/Errors/
-data/Screenshots/
+
+# Debug output
+debug/Screenshots/

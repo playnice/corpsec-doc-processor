@@ -100,12 +100,12 @@ def _parse_metadata_from_filename(stem: str):
     # Date: YYYYMMDD → YYYY-MM-DD
     date_str = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:8]}"
 
-    # Company: look up full name from config
+    # Company: look up full name from Entity List CSV
     company = config.get_company_full_name(short_name)
     if company:
         logger.info("Filename → Company: '%s' → '%s'", short_name, company)
     else:
-        logger.warning("Filename → Company short '%s' not in config", short_name)
+        logger.error("Filename → Abbreviation '%s' not found in Entity List CSV", short_name)
 
     logger.info("Filename → Type: '%s' | Date: %s", doc_type, date_str)
 
