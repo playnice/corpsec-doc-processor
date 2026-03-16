@@ -289,14 +289,14 @@ class TeamworkUploader:
         try:
             logger.info("[Step 6] Clicking Files tab...")
             files_tab = page.locator(
-                'a:has-text("Files"), '
-                'li a:has-text("Files"), '
                 '.nav-tabs a:has-text("Files"), '
-                '[role="tab"]:has-text("Files")'
+                '[role="tab"]:has-text("Files"), '
+                'li a:has-text("Files"), '
+                'a:has-text("Files")'
             ).first
-            files_tab.click(timeout=ACTION_TIMEOUT)
-            page.wait_for_load_state("networkidle")
-            time.sleep(1)
+            # force=True bypasses actionability checks (overlay/spinner may cover tab)
+            files_tab.click(timeout=ACTION_TIMEOUT, force=True)
+            time.sleep(2)
             logger.info("[Step 6] Files tab opened.")
             return True
 
