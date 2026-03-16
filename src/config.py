@@ -58,7 +58,7 @@ _ENTITY_SUFFIXES = {
     "pte", "ltd", "pte.", "ltd.", "sdn", "bhd", "sdn.", "bhd.",
     "inc", "inc.", "corp", "corp.", "co", "co.",
     "limited", "private", "company", "incorporated",
-    "llc", "llp", "lp", "plc",
+    "llc", "llp", "lp", "plc", "pty", 
 }
 
 

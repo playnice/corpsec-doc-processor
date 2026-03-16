@@ -525,31 +525,52 @@ class TeamworkUploader:
         matches = TeamworkUploader._matching_categories(doc_type, threshold=0.0)
         return matches[0] if matches else ("", "", 0.0)
 
-    def _select_category(self, category: str | None) -> bool:
+    def _select_category(self, category: str | None, extra_values: list[str] | None = None) -> bool:
         """Match the document type to all relevant categories and select them
-        on the hidden <select multiple> via JS (avoids Select2 search quirks)."""
+        on the hidden <select multiple> via JS (avoids Select2 search quirks).
+
+        *extra_values* are category option values to always include (from
+        filename keyword rules like ACRA → "24", DRIW → "11")."""
         page = self._page
-        if not page or not category:
-            logger.info("[Step 11] No category provided — skipping.")
+        if not page:
             return True
 
         try:
-            matches = self._matching_categories(category)
-            logger.info("[Step 11] Category input: '%s'", category)
+            values: list[str] = list(extra_values or [])
 
-            # Categories cannot be blank — always select at least the best match
-            if not matches:
-                logger.info("[Step 11] No matches above threshold — falling back to best match.")
-                best = self._best_category_match(category)
-                if best[0]:
-                    matches = [best]
-                else:
-                    logger.warning("[Step 11] Could not find any category match at all.")
-                    return True
+            if category:
+                matches = self._matching_categories(category)
+                logger.info("[Step 11] Category input: '%s'", category)
 
-            values = [m[0] for m in matches]
-            for val, label, score in matches:
-                logger.info("[Step 11]   → '%s' (value=%s, score=%.2f)", label, val, score)
+                # Always select at least the best match if nothing above threshold
+                if not matches:
+                    logger.info("[Step 11] No matches above threshold — falling back to best match.")
+                    best = self._best_category_match(category)
+                    if best[0]:
+                        matches = [best]
+
+                for val, label, score in matches:
+                    logger.info("[Step 11]   → '%s' (value=%s, score=%.2f)", label, val, score)
+                values.extend(m[0] for m in matches)
+            else:
+                logger.info("[Step 11] No category text provided.")
+
+            # Log any extra keyword-based categories
+            for ev in (extra_values or []):
+                label = self._CATEGORIES.get(ev, "?")
+                logger.info("[Step 11]   + '%s' (value=%s, from filename keyword)", label, ev)
+
+            if not values:
+                logger.warning("[Step 11] No categories to select — skipping.")
+                return True
+
+            # De-duplicate while preserving order
+            seen: set[str] = set()
+            unique_values: list[str] = []
+            for v in values:
+                if v not in seen:
+                    seen.add(v)
+                    unique_values.append(v)
 
             # Find doc_category <select> elements
             selects = page.locator('select[name*="doc_category"]').all()
@@ -582,7 +603,7 @@ class TeamworkUploader:
                     });
                     return {selectCount: selects.length, setCount: setCount};
                 }
-            """, values)
+            """, unique_values)
 
             logger.info("[Step 11] JS result: %s", result)
             return True
@@ -839,19 +860,35 @@ class TeamworkUploader:
             if not self._choose_file(file_path):
                 return False
 
-            # Step 9: Description (document content/subject)
+            # Derive description and extra categories from filename
             description = ""
             if metadata and metadata.document_content:
                 description = metadata.document_content
+            extra_category_values: list[str] = []
+            fname = file_path.stem  # filename without extension
+
+            # Filename keyword → category mapping & description cleanup
+            _KEYWORD_RULES: list[tuple[str, str, str]] = [
+                # (keyword_in_filename, category_value, prefix_to_strip_from_desc)
+                ("ACRA", "24", "ACRA-"),   # ACRA Lodgements
+                ("DRIW", "11", "DRIW-"),   # Directors' Written Resolution/ Minutes of BODM
+            ]
+            for keyword, cat_value, strip_prefix in _KEYWORD_RULES:
+                if keyword in fname:
+                    extra_category_values.append(cat_value)
+                    if description.startswith(strip_prefix):
+                        description = description[len(strip_prefix):]
+
+            # Step 9: Description
             self._fill_description(description)
 
             # Step 10: Resolution Date
             resolution_date = metadata.document_date if metadata else None
             self._fill_resolution_date(resolution_date)
 
-            # Step 11: Category (fuzzy-matched from AI-extracted document type)
+            # Step 11: Category (fuzzy-matched + filename keyword rules)
             doc_type = metadata.document_type if metadata else None
-            self._select_category(doc_type)
+            self._select_category(doc_type, extra_values=extra_category_values)
 
             # Step 12: Save
             return self._click_save()
