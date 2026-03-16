@@ -240,6 +240,11 @@ class TeamworkUploader:
             # Step 5: Find the matching row and click its View button
             logger.info("[Step 5] Looking for matching company row...")
 
+            # Wait for rows that contain a View button (skip "No matching records" row)
+            page.locator('#datatable tbody tr a[href*="view_company"]').first.wait_for(
+                state="visible", timeout=ACTION_TIMEOUT
+            )
+
             # Find all visible rows in the datatable
             rows = page.locator('#datatable tbody tr').all()
             if not rows:
@@ -247,20 +252,32 @@ class TeamworkUploader:
                 self._save_screenshot("step5_no_rows")
                 return False
 
+            def _normalize(s: str) -> str:
+                """Strip dots and extra whitespace for fuzzy comparison."""
+                return " ".join(s.replace(".", "").lower().split())
+
             # Find the best matching row by company name text
             target_row = None
-            company_lower = company_name.lower()
-            search_lower = search_term.lower()
+            norm_company = _normalize(company_name)
+            norm_search = _normalize(search_term)
             for row in rows:
-                row_text = (row.text_content() or "").lower()
-                if company_lower in row_text or search_lower in row_text:
+                row_text = _normalize(row.text_content() or "")
+                if norm_company in row_text or norm_search in row_text:
                     target_row = row
                     break
 
             if not target_row:
-                # Fallback: just use the first row
-                logger.warning("No exact match found, using first result row.")
-                target_row = rows[0]
+                # Fallback: use the first row that has a View button
+                for row in rows:
+                    if row.locator('a[href*="view_company"]').count() > 0:
+                        logger.warning("No exact match found, using first result row.")
+                        target_row = row
+                        break
+
+            if not target_row:
+                logger.error("No actionable rows in search results.")
+                self._save_screenshot("step5_no_rows")
+                return False
 
             # Click the View button within this specific row
             view_btn = target_row.locator('a[href*="view_company"]').first
