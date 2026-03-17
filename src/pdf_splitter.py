@@ -135,6 +135,17 @@ _MONTH_MAP = {
     "OCTOBER": "10", "NOVEMBER": "11", "DECEMBER": "12",
 }
 
+# OCR-mangled month variants (e.g. JNN→JUN, AUG with ! for 1 in year)
+_MONTH_FUZZY: dict[str, str] = {
+    "JNN": "06", "JUM": "06", "JUH": "06",
+    "JAM": "01", "JAN": "01",
+    "FE8": "02",
+    "AUC": "08", "AUG": "08",
+    "0CT": "10",
+    "NOY": "11",
+    "DFC": "12", "DEC": "12",
+}
+
 # Subject normalization: raw OCR subject → clean document type
 _SUBJECT_NORMALIZATIONS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"APPOINTMENT\s+OF\s+ALTERNATE\s+DIRECTOR", re.I), "Appointment of Alternate Director"),
@@ -233,37 +244,92 @@ def _subjects_match(subj1: str, subj2: str) -> bool:
     return n1 == n2
 
 
+def _resolve_month(raw: str) -> str | None:
+    """Resolve a month string, handling OCR errors."""
+    upper = raw.upper()
+    # Try exact match first (full name or abbreviation)
+    m = _MONTH_MAP.get(upper) or _MONTH_MAP.get(upper[:3])
+    if m:
+        return m
+    # Try fuzzy OCR match on first 3 chars
+    return _MONTH_FUZZY.get(upper[:3])
+
+
+def _fix_ocr_day(raw: str) -> str | None:
+    """Try to fix OCR-mangled day digits (e.g. '73' → '23').
+
+    Common OCR digit confusions: 2↔7, 1↔4, 0↔8, 5↔6.
+    Returns a valid day string (01-31) or None if unfixable.
+    """
+    try:
+        val = int(raw)
+    except (ValueError, TypeError):
+        return None
+    if 1 <= val <= 31:
+        return raw.zfill(2)
+    # Try swapping first digit with common OCR alternatives
+    _OCR_DIGIT_ALTS = {"7": ["2", "1"], "4": ["1"], "8": ["0", "6"],
+                       "6": ["5", "8"], "9": ["4"], "0": ["8"]}
+    s = str(val)
+    if len(s) == 2 and s[0] in _OCR_DIGIT_ALTS:
+        for alt in _OCR_DIGIT_ALTS[s[0]]:
+            candidate = int(alt + s[1])
+            if 1 <= candidate <= 31:
+                return str(candidate).zfill(2)
+    return None
+
+
+def _fix_ocr_year(raw: str) -> str | None:
+    """Fix OCR-mangled year strings like '202!' or '202|' → '2021'."""
+    # Replace common OCR substitutions for digits
+    fixed = raw.replace("!", "1").replace("|", "1").replace("l", "1").replace("O", "0").replace("o", "0")
+    if fixed.isdigit() and len(fixed) == 4:
+        return fixed
+    return None
+
+
 def _extract_date_from_text(text: str) -> str | None:
-    """Extract a date from page text (DD-MMM-YYYY, DD MMM YYYY, MM/DD/YYYY)."""
-    # Pattern: "Date[d]: DD-MMM-YYYY" or "DD MMM YYYY" near Date keyword
-    # Allow multiple separator chars (OCR may produce "Dated: = 07 JUN 2021")
+    """Extract a date from page text, handling various formats and OCR errors."""
+
+    # Pattern 1: "Date[d]: DD MMM YYYY" (with OCR separator noise)
     m = re.search(
-        r"[Dd]ate[d]?\s*[:;=\s]*[-–]?\s*(\d{1,2})\s*[-/\s]*"
-        r"([A-Za-z]{3,9})\s*[-/,\s]*(\d{4})",
+        r"[Dd]ate[d]?\s*[:;=\s]*[-–]?\s*(\d{1,2})\s*[-/:;\s]*"
+        r"([A-Za-z]{3,9})\s*[-/,\s]*(\S{4})",
         text,
     )
     if m:
-        day = m.group(1).zfill(2)
-        month_str = m.group(2).upper()
-        # Handle full month names and abbreviations
-        month = _MONTH_MAP.get(month_str[:3])
-        year = m.group(3)
-        if month and 1 <= int(day) <= 31:
+        day = _fix_ocr_day(m.group(1))
+        month = _resolve_month(m.group(2))
+        year = _fix_ocr_year(m.group(3))
+        if day and month and year:
             return f"{year}-{month}-{day}"
 
-    # Pattern: "Dated: DD MMM YYYY" without explicit "Date:" prefix
+    # Pattern 2: "Dated this DDth day of MONTH YYYY"
     m = re.search(
-        r"[Dd]ated\s*[:\s]*(\d{1,2})\s*([A-Za-z]{3,9})\s*(\d{4})",
+        r"[Dd]ated\s+this\s+(\d{1,2})\s*(?:st|nd|rd|th|\"|\u201d|\u2019|.)?"
+        r"\s*day\s+of\s+([A-Za-z]{3,9})\s*[-/,\s]*(\S{4})",
         text,
     )
     if m:
-        day = m.group(1).zfill(2)
-        month = _MONTH_MAP.get(m.group(2).upper()[:3])
-        year = m.group(3)
-        if month and 1 <= int(day) <= 31:
+        day = _fix_ocr_day(m.group(1))
+        month = _resolve_month(m.group(2))
+        year = _fix_ocr_year(m.group(3))
+        if day and month and year:
             return f"{year}-{month}-{day}"
 
-    # Pattern: M/DD/YYYY (US-style from bank transfers)
+    # Pattern 3: "DD MMM YYYY" standalone (no Date prefix)
+    m = re.search(
+        r"(?<!\d)(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})(?!\d)",
+        text,
+    )
+    if m:
+        day = _fix_ocr_day(m.group(1))
+        month = _resolve_month(m.group(2))
+        year = m.group(3)
+        if day and month:
+            return f"{year}-{month}-{day}"
+
+    # Pattern 4: M/DD/YYYY (US-style from bank transfers)
     m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
     if m:
         month = m.group(1).zfill(2)
