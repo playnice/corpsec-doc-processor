@@ -236,8 +236,9 @@ def _subjects_match(subj1: str, subj2: str) -> bool:
 def _extract_date_from_text(text: str) -> str | None:
     """Extract a date from page text (DD-MMM-YYYY, DD MMM YYYY, MM/DD/YYYY)."""
     # Pattern: "Date[d]: DD-MMM-YYYY" or "DD MMM YYYY" near Date keyword
+    # Allow multiple separator chars (OCR may produce "Dated: = 07 JUN 2021")
     m = re.search(
-        r"[Dd]ate[d]?\s*[:;=]?\s*[-–]?\s*(\d{1,2})\s*[-/\s]*"
+        r"[Dd]ate[d]?\s*[:;=\s]*[-–]?\s*(\d{1,2})\s*[-/\s]*"
         r"([A-Za-z]{3,9})\s*[-/,\s]*(\d{4})",
         text,
     )
