@@ -400,7 +400,10 @@ def _detect_boundaries_heuristic(
                 company = _extract_company_name(text)
                 prev_company = boundaries[-1][2] if boundaries else None
                 if company and prev_company and not _companies_match(company, prev_company):
-                    boundaries.append((i, non_res_subject, company))
+                    # Use the main document's company (previous boundary),
+                    # not the foreign company on this page (e.g. Letter of
+                    # Authority FROM another company still belongs to DDI).
+                    boundaries.append((i, non_res_subject, prev_company))
                     prev_norm_subject = _normalize_subject(non_res_subject)
 
     if not boundaries:
@@ -737,6 +740,37 @@ def _split_pdf_by_segments(
 # Interactive review
 # ---------------------------------------------------------------------------
 
+def _display_segments(segments: list[DocumentSegment]) -> None:
+    """Print the segment table with aligned columns and date warnings."""
+    # Column header
+    print(
+        f"  {'#':>3}  {'Pages':<10}  {'Date':<12}  {'Abbr':<6}  {'Document Type'}"
+    )
+    print(f"  {'---':>3}  {'-----':<10}  {'----':<12}  {'----':<6}  {'-------------'}")
+
+    for i, seg in enumerate(segments):
+        abbr = seg.abbreviation or "???"
+        date_str = seg.document_date or "no-date"
+        doc_type = seg.document_type or "unknown"
+        pages = f"{seg.page_start}-{seg.page_end}"
+
+        # Highlight date issues
+        if not seg.document_date:
+            date_display = f"{'** ' + date_str + ' **':<12}"
+        else:
+            date_display = f"{date_str:<12}"
+
+        print(
+            f"  {i + 1:>3}. {pages:<10}  {date_display}  {abbr:<6}  {doc_type}"
+        )
+
+    # Show warning if any segments have no date
+    no_date_segs = [i + 1 for i, s in enumerate(segments) if not s.document_date]
+    if no_date_segs:
+        nums = ", ".join(str(n) for n in no_date_segs)
+        print(f"\n  ⚠ Segment(s) {nums} missing date — use 'e' to set manually")
+
+
 def _interactive_review(
     segments: list[DocumentSegment], total_pages: int,
 ) -> list[DocumentSegment] | None:
@@ -747,15 +781,7 @@ def _interactive_review(
     print("\n" + "=" * 70)
     print("  Detected document segments (review before splitting)")
     print("=" * 70)
-
-    for i, seg in enumerate(segments):
-        abbr = seg.abbreviation or "???"
-        print(
-            f"  {i + 1}. Pages {seg.page_start:>2}-{seg.page_end:<2}  |  "
-            f"{seg.document_date or 'no-date'}  |  {abbr}  |  "
-            f"{seg.document_type or 'unknown'}"
-        )
-
+    _display_segments(segments)
     print("=" * 70)
     print("  Options:")
     print("    Enter  = Accept and split")
@@ -775,27 +801,13 @@ def _interactive_review(
 
         elif choice == "e":
             segments = _edit_segment(segments, total_pages)
-            # Re-display
             print()
-            for i, seg in enumerate(segments):
-                abbr = seg.abbreviation or "???"
-                print(
-                    f"  {i + 1}. Pages {seg.page_start:>2}-{seg.page_end:<2}  |  "
-                    f"{seg.document_date or 'no-date'}  |  {abbr}  |  "
-                    f"{seg.document_type or 'unknown'}"
-                )
+            _display_segments(segments)
 
         elif choice == "d":
             segments = _delete_segment(segments, total_pages)
-            # Re-display
             print()
-            for i, seg in enumerate(segments):
-                abbr = seg.abbreviation or "???"
-                print(
-                    f"  {i + 1}. Pages {seg.page_start:>2}-{seg.page_end:<2}  |  "
-                    f"{seg.document_date or 'no-date'}  |  {abbr}  |  "
-                    f"{seg.document_type or 'unknown'}"
-                )
+            _display_segments(segments)
 
         else:
             print("  Invalid choice. Press Enter to accept, 'e' to edit, 'd' to delete, 'c' to cancel.")
