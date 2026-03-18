@@ -436,7 +436,7 @@ def _detect_boundaries_heuristic(
             document_date=date,
         ))
 
-    return segments
+    return _merge_resignation_appointment(segments)
 
 
 def _companies_match(name1: str, name2: str) -> bool:
@@ -446,6 +446,61 @@ def _companies_match(name1: str, name2: str) -> bool:
         n = re.sub(r"\b(pte|ltd|limited|private|investment)\b", "", n)
         return re.sub(r"\s+", " ", n).strip()
     return norm(name1) == norm(name2)
+
+
+# Regex to detect resignation/appointment and extract the position
+_RESIGNATION_RE = re.compile(r"Resignation\s+of\s+(.+)", re.I)
+_APPOINTMENT_RE = re.compile(r"Appointment\s+of\s+(.+)", re.I)
+
+
+def _merge_resignation_appointment(segments: list[DocumentSegment]) -> list[DocumentSegment]:
+    """Merge consecutive Resignation + Appointment of same position into Change of [Position].
+
+    E.g. "DRIW-Resignation of Secretary" followed by "DRIW-Appointment of Secretary"
+    becomes a single segment: "DRIW-Change of Secretary" spanning both page ranges.
+    """
+    if len(segments) < 2:
+        return segments
+
+    merged: list[DocumentSegment] = []
+    i = 0
+    while i < len(segments):
+        if i + 1 < len(segments):
+            cur_type = segments[i].document_type or ""
+            nxt_type = segments[i + 1].document_type or ""
+
+            # Strip prefix (e.g. "DRIW-") for matching
+            cur_prefix, cur_rest = (cur_type.split("-", 1) + [""])[:2]
+            nxt_prefix, nxt_rest = (nxt_type.split("-", 1) + [""])[:2]
+
+            res_match = _RESIGNATION_RE.match(cur_rest)
+            appt_match = _APPOINTMENT_RE.match(nxt_rest)
+
+            if res_match and appt_match:
+                res_pos = res_match.group(1).strip().lower()
+                appt_pos = appt_match.group(1).strip().lower()
+
+                # Same position (e.g. both "Secretary" or both "Director")
+                if res_pos == appt_pos:
+                    position = res_match.group(1).strip()
+                    new_type = f"{cur_prefix}-Change of {position}" if cur_prefix else f"Change of {position}"
+                    # Merge: use earlier date, span both page ranges
+                    date = segments[i].document_date or segments[i + 1].document_date
+                    merged_seg = DocumentSegment(
+                        page_start=segments[i].page_start,
+                        page_end=segments[i + 1].page_end,
+                        company_name=segments[i].company_name,
+                        document_type=new_type,
+                        document_date=date,
+                    )
+                    merged.append(merged_seg)
+                    i += 2
+                    continue
+
+        merged.append(segments[i])
+        i += 1
+
+    return merged
 
 
 def _extract_doc_prefix_from_filename(filename: str) -> str:
@@ -595,7 +650,7 @@ def _detect_boundaries_ai(page_texts: list[str]) -> list[DocumentSegment]:
         segments[-1].page_end = page_count
 
     segments = [s for s in segments if s.page_start <= page_count]
-    return segments
+    return _merge_resignation_appointment(segments)
 
 
 def _normalize_doc_type(doc_type: str | None) -> str | None:
