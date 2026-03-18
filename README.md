@@ -71,6 +71,8 @@ corpsec-doc-processor/
 │   └── Errors/               ← Problem files for manual review
 ├── debug/                    ← Debug artifacts
 │   └── Screenshots/          ← Browser automation debug screenshots & HTML
+├── setup.bat                 ← One-click setup script (Windows)
+├── run.bat                   ← Quick launcher (activates venv + runs)
 ├── .env / .env.example       ← Environment configuration
 ├── .gitignore
 ├── README.md
@@ -79,7 +81,7 @@ corpsec-doc-processor/
 
 ## Prerequisites
 
-1. **Python 3.11+**
+1. **Python 3.11+** — [Download](https://www.python.org/downloads/) (check "Add Python to PATH" during install)
 2. **Tesseract OCR** — [Download for Windows](https://github.com/UB-Mannheim/tesseract/wiki)
 3. **Ollama** — [Download](https://ollama.ai) then pull the model:
    ```bash
@@ -88,6 +90,19 @@ corpsec-doc-processor/
 4. **Teamwork.sg account** (optional — for upload modes 2 & 3)
 
 ## Installation
+
+### Quick Setup (Recommended)
+
+Double-click `setup.bat` — it will:
+1. Verify Python, Tesseract, and Ollama are installed
+2. Create a virtual environment and install all dependencies
+3. Install Playwright Chromium browser
+4. Create data folders and `.env` configuration
+5. Pull the Ollama model
+
+After setup, edit `.env` with your Teamwork.sg credentials.
+
+### Manual Setup
 
 ```bash
 # Clone / copy this project
@@ -134,15 +149,16 @@ playwright install chromium
 
 ## Usage
 
-### Watch Mode (Continuous)
+### Quick Start
 
-Drop PDFs into the appropriate folder and they'll be processed automatically:
+Double-click `run.bat` or:
 
 ```bash
+venv\Scripts\activate
 python run.py
 ```
 
-On startup you'll be prompted to select a processing mode (1–4). The program watches the input folder and processes files as they arrive.
+On startup you'll be prompted to select a processing mode (1–4). Drop PDFs into the appropriate folder and they'll be processed automatically.
 
 ### Single File Mode
 
