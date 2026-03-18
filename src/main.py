@@ -21,6 +21,7 @@ import queue
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import config
@@ -137,11 +138,7 @@ def process_pdf(pdf_path: Path) -> None:
             # Move original to Uploaded folder to indicate it's been processed
             config.UPLOADED_FOLDER.mkdir(parents=True, exist_ok=True)
             dest = config.UPLOADED_FOLDER / pdf_path.name
-            try:
-                shutil.move(str(pdf_path), str(dest))
-                logger.info("Original moved to: %s", dest)
-            except OSError:
-                logger.exception("Could not move original file")
+            _move_with_retry(pdf_path, dest)
         else:
             logger.error("Split failed — moving to errors.")
             _move_to_errors(pdf_path)
@@ -258,11 +255,7 @@ def _upload_and_move(file_path: Path, metadata=None) -> None:
         # Move to Uploaded folder
         config.UPLOADED_FOLDER.mkdir(parents=True, exist_ok=True)
         dest = config.UPLOADED_FOLDER / file_path.name
-        try:
-            shutil.move(str(file_path), str(dest))
-            logger.info("Moved to uploaded: %s", dest)
-        except OSError:
-            logger.exception("Could not move file to uploaded folder")
+        _move_with_retry(file_path, dest)
     else:
         logger.warning("Teamwork upload failed (file remains at: %s).", file_path)
 
@@ -270,15 +263,38 @@ def _upload_and_move(file_path: Path, metadata=None) -> None:
     logger.info("=" * 60)
 
 
+def _move_with_retry(src: Path, dest: Path, max_retries: int = 3, wait: int = 5) -> bool:
+    """Move a file, retrying if it's locked (e.g. open in a PDF reader)."""
+    for attempt in range(max_retries):
+        try:
+            shutil.move(str(src), str(dest))
+            logger.info("Moved to: %s", dest)
+            return True
+        except PermissionError:
+            remaining = max_retries - attempt - 1
+            if remaining > 0:
+                logger.warning(
+                    "File is locked (open in another program?): %s — "
+                    "retrying in %ds (%d retries left). Close the file to continue.",
+                    src.name, wait, remaining,
+                )
+                time.sleep(wait)
+            else:
+                logger.error(
+                    "Could not move file after %d attempts (still locked): %s",
+                    max_retries, src.name,
+                )
+        except OSError:
+            logger.exception("Could not move file: %s", src.name)
+            return False
+    return False
+
+
 def _move_to_errors(pdf_path: Path) -> None:
     """Move a problem file to the errors folder for manual review."""
     config.ERROR_FOLDER.mkdir(parents=True, exist_ok=True)
     dest = config.ERROR_FOLDER / pdf_path.name
-    try:
-        shutil.move(str(pdf_path), str(dest))
-        logger.info("Moved to errors: %s", dest)
-    except OSError:
-        logger.exception("Could not move file to errors folder")
+    _move_with_retry(pdf_path, dest)
 
 
 # ---------------------------------------------------------------------------
