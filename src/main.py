@@ -27,6 +27,7 @@ import config
 from ocr_engine import extract_text
 from ai_analyzer import analyze_document
 from renamer import rename_pdf
+from pdf_splitter import split_pdf
 from teamwork_uploader import TeamworkUploader
 from watcher import start_watching
 
@@ -48,6 +49,7 @@ logger = logging.getLogger("corpsec")
 MODE_RENAME_ONLY = 1
 MODE_RENAME_AND_UPLOAD = 2
 MODE_UPLOAD_ONLY = 3
+MODE_SPLIT_PDF = 4
 
 processing_mode: int = MODE_RENAME_ONLY
 teamwork: TeamworkUploader | None = None
@@ -62,13 +64,14 @@ def prompt_mode() -> int:
     print("  1. Rename Only")
     print("  2. Rename & Upload to Teamwork")
     print("  3. Upload to Teamwork Only")
+    print("  4. Split Combined PDF")
     print("=" * 50)
 
     while True:
-        choice = input("\n  Enter choice (1/2/3): ").strip()
-        if choice in ("1", "2", "3"):
+        choice = input("\n  Enter choice (1/2/3/4): ").strip()
+        if choice in ("1", "2", "3", "4"):
             return int(choice)
-        print("  Invalid choice. Please enter 1, 2, or 3.")
+        print("  Invalid choice. Please enter 1, 2, 3, or 4.")
 
 # ---------------------------------------------------------------------------
 # Pipeline
@@ -100,12 +103,12 @@ def _parse_metadata_from_filename(stem: str):
     # Date: YYYYMMDD → YYYY-MM-DD
     date_str = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:8]}"
 
-    # Company: look up full name from config
+    # Company: look up full name from Entity List CSV
     company = config.get_company_full_name(short_name)
     if company:
         logger.info("Filename → Company: '%s' → '%s'", short_name, company)
     else:
-        logger.warning("Filename → Company short '%s' not in config", short_name)
+        logger.error("Filename → Abbreviation '%s' not found in Entity List CSV", short_name)
 
     logger.info("Filename → Type: '%s' | Date: %s", doc_type, date_str)
 
@@ -124,6 +127,26 @@ def process_pdf(pdf_path: Path) -> None:
 
     logger.info("=" * 60)
     logger.info("Processing: %s", pdf_path.name)
+
+    # --- Mode 4: Split Combined PDF ---
+    if processing_mode == MODE_SPLIT_PDF:
+        logger.info("[Split] Splitting combined PDF: %s", pdf_path.name)
+        created = split_pdf(pdf_path, output_folder=config.RENAMED_FOLDER)
+        if created:
+            logger.info("Split into %d file(s) → %s", len(created), config.RENAMED_FOLDER)
+            # Move original to Uploaded folder to indicate it's been processed
+            config.UPLOADED_FOLDER.mkdir(parents=True, exist_ok=True)
+            dest = config.UPLOADED_FOLDER / pdf_path.name
+            try:
+                shutil.move(str(pdf_path), str(dest))
+                logger.info("Original moved to: %s", dest)
+            except OSError:
+                logger.exception("Could not move original file")
+        else:
+            logger.error("Split failed — moving to errors.")
+            _move_to_errors(pdf_path)
+        logger.info("=" * 60)
+        return
 
     if processing_mode == MODE_UPLOAD_ONLY:
         # File is already renamed — parse ALL metadata from filename
@@ -160,7 +183,6 @@ def process_pdf(pdf_path: Path) -> None:
             metadata.document_content, metadata.document_date,
         )
         _upload_and_move(pdf_path, metadata=metadata)
-        return
         return
 
     # Step 1: OCR / text extraction
@@ -267,6 +289,7 @@ MODE_LABELS = {
     MODE_RENAME_ONLY: "Rename Only",
     MODE_RENAME_AND_UPLOAD: "Rename & Upload to Teamwork",
     MODE_UPLOAD_ONLY: "Upload to Teamwork Only",
+    MODE_SPLIT_PDF: "Split Combined PDF",
 }
 
 
@@ -276,8 +299,13 @@ def run_watch_mode() -> None:
 
     processing_mode = prompt_mode()
 
-    # Upload-only watches the Renamed folder; other modes watch Inbox
-    watch_folder = config.RENAMED_FOLDER if processing_mode == MODE_UPLOAD_ONLY else config.WATCH_FOLDER
+    # Upload-only watches Renamed folder; Split watches Split folder; others watch Inbox
+    if processing_mode == MODE_UPLOAD_ONLY:
+        watch_folder = config.RENAMED_FOLDER
+    elif processing_mode == MODE_SPLIT_PDF:
+        watch_folder = config.SPLIT_FOLDER
+    else:
+        watch_folder = config.WATCH_FOLDER
 
     logger.info("Starting CorpSec Document Processor — Watch Mode")
     logger.info("Mode: %s", MODE_LABELS[processing_mode])
@@ -288,6 +316,7 @@ def run_watch_mode() -> None:
 
     # Ensure folders exist
     config.WATCH_FOLDER.mkdir(parents=True, exist_ok=True)
+    config.SPLIT_FOLDER.mkdir(parents=True, exist_ok=True)
     config.RENAMED_FOLDER.mkdir(parents=True, exist_ok=True)
     config.UPLOADED_FOLDER.mkdir(parents=True, exist_ok=True)
     config.ERROR_FOLDER.mkdir(parents=True, exist_ok=True)
@@ -297,14 +326,21 @@ def run_watch_mode() -> None:
         teamwork = TeamworkUploader()
 
     # Process any PDFs already sitting in the folder
-    existing = sorted(watch_folder.glob("*.pdf"))
+    existing = set(watch_folder.glob("*.pdf"))
     if existing:
         logger.info("Found %d existing PDF(s) — processing...", len(existing))
-        for pdf in existing:
+        for pdf in sorted(existing):
             process_pdf(pdf)
 
     # Start watching for new files (queue-based, so processing stays on main thread)
     observer, file_queue = start_watching(watch_folder)
+
+    # Re-scan for files added during initial batch processing
+    missed = sorted(f for f in watch_folder.glob("*.pdf") if f not in existing)
+    if missed:
+        logger.info("Found %d file(s) added during batch — queuing...", len(missed))
+        for pdf in missed:
+            file_queue.put(pdf)
 
     logger.info("Watching for new PDFs... (Ctrl+C to stop)")
     try:

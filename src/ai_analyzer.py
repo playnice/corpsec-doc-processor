@@ -63,9 +63,9 @@ def _fix_ocr_company_name(name: str | None) -> str | None:
         return name  # no digits to fix
 
     # Check if the corrected name matches a known company
-    corrected_lower = corrected.strip().lower()
-    for key in config.COMPANY_SHORT_NAMES:
-        if key in corrected_lower or corrected_lower in key:
+    corrected_core = config._strip_entity_suffix(corrected)
+    for known_core in config.get_all_company_cores():
+        if known_core in corrected_core or corrected_core in known_core:
             logger.info("OCR company name corrected: '%s' → '%s'", name, corrected)
             return corrected
 
@@ -270,16 +270,13 @@ def _validate_company_name(metadata: DocumentMetadata, ocr_text: str) -> None:
         metadata.company_name,
     )
 
-    # Strategy 1: Try to find a known company from config in the OCR text
-    for full_name in config.COMPANY_SHORT_NAMES:
-        known_core = _strip_entity_suffixes(full_name)
+    # Strategy 1: Try to find a known company from Entity List in the OCR text
+    for known_core, abbr in config.get_all_company_cores().items():
         if known_core and known_core in text_lower:
-            corrected = config.get_company_full_name(
-                config.get_company_short_name(full_name)
-            )
+            corrected = config.get_company_full_name(abbr)
             if corrected:
                 logger.info(
-                    "Corrected company: '%s' → '%s' (config match in OCR text)",
+                    "Corrected company: '%s' → '%s' (Entity List match in OCR text)",
                     metadata.company_name, corrected,
                 )
                 metadata.company_name = corrected
