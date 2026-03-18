@@ -884,7 +884,11 @@ class TeamworkUploader:
 
             # Step 11: Category (fuzzy-matched + filename keyword rules)
             doc_type = metadata.document_type if metadata else None
-            self._select_category(doc_type, extra_values=extra_category_values)
+            # If keyword rules already matched, use only those categories
+            if extra_category_values:
+                self._select_category(None, extra_values=extra_category_values)
+            else:
+                self._select_category(doc_type)
 
             # Step 12: Save
             return self._click_save()
