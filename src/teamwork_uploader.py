@@ -867,6 +867,7 @@ class TeamworkUploader:
                 ("DRIW", "11", "DRIW-"),   # Directors' Written Resolution/ Minutes of BODM
                 ("FORM", "28", "FORM-"),   # Statutory forms
                 ("CERT", "25", "CERT-"),   # Share Certificates
+                ("AFS", "26", "AFS-"),     # Audited Financial Statements
             ]
             for keyword, cat_value, strip_prefix in _KEYWORD_RULES:
                 if keyword in fname:
