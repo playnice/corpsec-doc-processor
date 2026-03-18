@@ -454,10 +454,10 @@ _APPOINTMENT_RE = re.compile(r"Appointment\s+of\s+(.+)", re.I)
 
 
 def _merge_resignation_appointment(segments: list[DocumentSegment]) -> list[DocumentSegment]:
-    """Merge consecutive Resignation + Appointment of same position into Change of [Position].
+    """Merge consecutive Resignation + Appointment (either order) of same position into Change of [Position].
 
     E.g. "DRIW-Resignation of Secretary" followed by "DRIW-Appointment of Secretary"
-    becomes a single segment: "DRIW-Change of Secretary" spanning both page ranges.
+    (or vice versa) becomes a single segment: "DRIW-Change of Secretary".
     """
     if len(segments) < 2:
         return segments
@@ -471,31 +471,33 @@ def _merge_resignation_appointment(segments: list[DocumentSegment]) -> list[Docu
 
             # Strip prefix (e.g. "DRIW-") for matching
             cur_prefix, cur_rest = (cur_type.split("-", 1) + [""])[:2]
-            nxt_prefix, nxt_rest = (nxt_type.split("-", 1) + [""])[:2]
+            _, nxt_rest = (nxt_type.split("-", 1) + [""])[:2]
 
-            res_match = _RESIGNATION_RE.match(cur_rest)
-            appt_match = _APPOINTMENT_RE.match(nxt_rest)
+            # Check both orderings
+            cur_res = _RESIGNATION_RE.match(cur_rest)
+            cur_appt = _APPOINTMENT_RE.match(cur_rest)
+            nxt_res = _RESIGNATION_RE.match(nxt_rest)
+            nxt_appt = _APPOINTMENT_RE.match(nxt_rest)
 
-            if res_match and appt_match:
-                res_pos = res_match.group(1).strip().lower()
-                appt_pos = appt_match.group(1).strip().lower()
+            position = None
+            if cur_res and nxt_appt and cur_res.group(1).strip().lower() == nxt_appt.group(1).strip().lower():
+                position = cur_res.group(1).strip()
+            elif cur_appt and nxt_res and cur_appt.group(1).strip().lower() == nxt_res.group(1).strip().lower():
+                position = cur_appt.group(1).strip()
 
-                # Same position (e.g. both "Secretary" or both "Director")
-                if res_pos == appt_pos:
-                    position = res_match.group(1).strip()
-                    new_type = f"{cur_prefix}-Change of {position}" if cur_prefix else f"Change of {position}"
-                    # Merge: use earlier date, span both page ranges
-                    date = segments[i].document_date or segments[i + 1].document_date
-                    merged_seg = DocumentSegment(
-                        page_start=segments[i].page_start,
-                        page_end=segments[i + 1].page_end,
-                        company_name=segments[i].company_name,
-                        document_type=new_type,
-                        document_date=date,
-                    )
-                    merged.append(merged_seg)
-                    i += 2
-                    continue
+            if position:
+                new_type = f"{cur_prefix}-Change of {position}" if cur_prefix else f"Change of {position}"
+                date = segments[i].document_date or segments[i + 1].document_date
+                merged_seg = DocumentSegment(
+                    page_start=segments[i].page_start,
+                    page_end=segments[i + 1].page_end,
+                    company_name=segments[i].company_name,
+                    document_type=new_type,
+                    document_date=date,
+                )
+                merged.append(merged_seg)
+                i += 2
+                continue
 
         merged.append(segments[i])
         i += 1
