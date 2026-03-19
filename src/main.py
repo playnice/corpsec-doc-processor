@@ -342,7 +342,7 @@ def run_watch_mode() -> None:
         teamwork = TeamworkUploader()
 
     # Process any PDFs already sitting in the folder
-    existing = set(watch_folder.glob("*.pdf"))
+    existing = {f for f in watch_folder.iterdir() if f.suffix.lower() == ".pdf"}
     if existing:
         logger.info("Found %d existing PDF(s) — processing...", len(existing))
         for pdf in sorted(existing):
@@ -352,7 +352,8 @@ def run_watch_mode() -> None:
     observer, file_queue = start_watching(watch_folder)
 
     # Re-scan for files added during initial batch processing
-    missed = sorted(f for f in watch_folder.glob("*.pdf") if f not in existing)
+    missed = sorted(f for f in watch_folder.iterdir()
+                    if f.suffix.lower() == ".pdf" and f not in existing)
     if missed:
         logger.info("Found %d file(s) added during batch — queuing...", len(missed))
         for pdf in missed:
