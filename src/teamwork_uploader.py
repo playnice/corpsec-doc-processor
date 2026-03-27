@@ -100,34 +100,46 @@ class TeamworkUploader:
         return self._page
 
     def close(self) -> None:
-        """Shut down the browser cleanly."""
+        """Shut down the browser cleanly, with a hard-kill fallback."""
+        # Grab the browser process PID before attempting graceful close
+        browser_pid = None
         try:
-            if self._page:
-                self._page.close()
+            if self._browser and self._browser.process:
+                browser_pid = self._browser.process.pid
         except Exception:
             pass
-        try:
-            if self._context:
-                self._context.close()
-        except Exception:
-            pass
-        try:
-            if self._browser:
-                self._browser.close()
-        except Exception:
-            pass
+
+        # Attempt graceful close (may hang after KeyboardInterrupt)
+        for obj, name in [
+            (self._page, "page"),
+            (self._context, "context"),
+            (self._browser, "browser"),
+        ]:
+            try:
+                if obj:
+                    obj.close()
+            except Exception:
+                pass
+
         try:
             if self._playwright:
                 self._playwright.stop()
         except Exception:
             pass
-        finally:
-            self._page = None
-            self._context = None
-            self._browser = None
-            self._playwright = None
-            self._playwright = None
-            self._logged_in = False
+
+        # If browser process is still alive, force-kill it
+        if browser_pid:
+            try:
+                import os, signal
+                os.kill(browser_pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
+
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._playwright = None
+        self._logged_in = False
 
     # ------------------------------------------------------------------
     # Step 0: Login
@@ -472,29 +484,29 @@ class TeamworkUploader:
 
     # Known category options on teamwork.sg (value → label)
     _CATEGORIES: dict[str, str] = {
-        "24": "ACRA Lodgements",
-        "31": "Agreement",
-        "29": "Annual Report",
-        "27": "Business Profile",
-        "11": "Directors' Written Resolution/ Minutes of BODM",
-        "26": "Financial Statements",
-        "30": "IRAS Stamp Duty",
-        "12": "Members' Written Resolution / Minutes of AGM/EGM",
+        "9":  "Shares Full Payment",
         "10": "Permanent records",
-        "16": "Register of Allotments",
-        "18": "Register of Auditors",
-        "19": "Register of Charges",
-        "23": "Register of Data Protection Officers",
+        "11": "Directors' Written Resolution/ Minutes of BODM",
+        "12": "Members' Written Resolution / Minutes of AGM/EGM",
         "13": "Register of Directors",
         "14": "Register of Members",
+        "15": "Register of Secretaries",
+        "16": "Register of Allotments",
+        "17": "Register of Transfer",
+        "18": "Register of Auditors",
+        "19": "Register of Charges",
+        "20": "Register of Registrable Controllers",
         "21": "Register of Nominee Directors",
         "22": "Register of Nominee Shareholders",
-        "20": "Register of Registrable Controllers",
-        "15": "Register of Secretaries",
-        "17": "Register of Transfer",
+        "23": "Register of Data Protection Officers",
+        "24": "ACRA Lodgements",
         "25": "Share Certificates",
-        "9":  "Shares Full Payment",
+        "26": "Financial Statements",
+        "27": "Business Profile",
         "28": "Statutory forms",
+        "29": "Annual Report",
+        "30": "IRAS Stamp Duty",
+        "31": "Agreement",
     }
 
     @staticmethod
@@ -863,11 +875,25 @@ class TeamworkUploader:
             # Filename keyword → category mapping & description cleanup
             _KEYWORD_RULES: list[tuple[str, str, str]] = [
                 # (keyword_in_filename, category_value, prefix_to_strip_from_desc)
-                ("ACRA", "24", "ACRA-"),   # ACRA Lodgements
+                ("PF", "10", "PF-"),   # Permanent records
                 ("DRIW", "11", "DRIW-"),   # Directors' Written Resolution/ Minutes of BODM
-                ("FORM", "28", "FORM-"),   # Statutory forms
+                ("MRIW", "12", "MRIW-"),   # Members' Written Resolution / Minutes of AGM/EGM
+                ("Register of Directors", "13", ""),   # Register of Directors
+                ("Register of Members", "14", ""),   # Register of Members
+                ("Register of Secretaries", "15", ""),   # Register of Secretaries
+                ("Register of Allotments", "16", ""),   # Register of Allotments
+                ("Register of Transfer", "17", ""),   # Register of Transfer
+                ("Register of Auditors", "18", ""),   # Register of Auditors
+                ("Register of Charges", "19", ""),   # Register of Charges
+                ("Register of Registrable Controllers", "20", ""),   # Register of Registrable Controllers
+                ("Register of Nominee Directors", "21", ""),   # Register of Nominee Directors
+                ("Register of Nominee Shareholders", "22", ""),   # Register of Nominee Shareholders
+                ("Register of Data Protection Officers", "23", ""),   # Register of Data Protection Officers
+                ("ACRA", "24", "ACRA-"),   # ACRA Lodgements
                 ("CERT", "25", "CERT-"),   # Share Certificates
                 ("AFS", "26", "AFS-"),     # Audited Financial Statements
+                ("Business Profile", "27", ""),     # Business Profile
+                ("FORM", "28", "FORM-"),   # Statutory forms
             ]
             for keyword, cat_value, strip_prefix in _KEYWORD_RULES:
                 if keyword in fname:

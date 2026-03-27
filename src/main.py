@@ -375,12 +375,15 @@ def run_watch_mode() -> None:
     finally:
         logger.info("Shutting down...")
         observer.stop()
-        observer.join()
-        try:
-            if teamwork:
-                teamwork.close()
-        except Exception:
-            pass
+        observer.join(timeout=3)
+        if teamwork:
+            # Run close in a thread with timeout to avoid hanging on Ctrl+C
+            import threading
+            t = threading.Thread(target=teamwork.close, daemon=True)
+            t.start()
+            t.join(timeout=5)
+            if t.is_alive():
+                logger.warning("Browser close timed out — forcing exit.")
 
 
 def run_single_file(file_path: str) -> None:
