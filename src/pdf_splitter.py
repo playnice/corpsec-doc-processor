@@ -436,7 +436,7 @@ def _detect_boundaries_heuristic(
             document_date=date,
         ))
 
-    return segments
+    return _merge_resignation_appointment(segments)
 
 
 def _companies_match(name1: str, name2: str) -> bool:
@@ -446,6 +446,63 @@ def _companies_match(name1: str, name2: str) -> bool:
         n = re.sub(r"\b(pte|ltd|limited|private|investment)\b", "", n)
         return re.sub(r"\s+", " ", n).strip()
     return norm(name1) == norm(name2)
+
+
+# Regex to detect resignation/appointment and extract the position
+_RESIGNATION_RE = re.compile(r"Resignation\s+of\s+(.+)", re.I)
+_APPOINTMENT_RE = re.compile(r"Appointment\s+of\s+(.+)", re.I)
+
+
+def _merge_resignation_appointment(segments: list[DocumentSegment]) -> list[DocumentSegment]:
+    """Merge consecutive Resignation + Appointment (either order) of same position into Change of [Position].
+
+    E.g. "DRIW-Resignation of Secretary" followed by "DRIW-Appointment of Secretary"
+    (or vice versa) becomes a single segment: "DRIW-Change of Secretary".
+    """
+    if len(segments) < 2:
+        return segments
+
+    merged: list[DocumentSegment] = []
+    i = 0
+    while i < len(segments):
+        if i + 1 < len(segments):
+            cur_type = segments[i].document_type or ""
+            nxt_type = segments[i + 1].document_type or ""
+
+            # Strip prefix (e.g. "DRIW-") for matching
+            cur_prefix, cur_rest = (cur_type.split("-", 1) + [""])[:2]
+            _, nxt_rest = (nxt_type.split("-", 1) + [""])[:2]
+
+            # Check both orderings
+            cur_res = _RESIGNATION_RE.match(cur_rest)
+            cur_appt = _APPOINTMENT_RE.match(cur_rest)
+            nxt_res = _RESIGNATION_RE.match(nxt_rest)
+            nxt_appt = _APPOINTMENT_RE.match(nxt_rest)
+
+            position = None
+            if cur_res and nxt_appt and cur_res.group(1).strip().lower() == nxt_appt.group(1).strip().lower():
+                position = cur_res.group(1).strip()
+            elif cur_appt and nxt_res and cur_appt.group(1).strip().lower() == nxt_res.group(1).strip().lower():
+                position = cur_appt.group(1).strip()
+
+            if position:
+                new_type = f"{cur_prefix}-Change of {position}" if cur_prefix else f"Change of {position}"
+                date = segments[i].document_date or segments[i + 1].document_date
+                merged_seg = DocumentSegment(
+                    page_start=segments[i].page_start,
+                    page_end=segments[i + 1].page_end,
+                    company_name=segments[i].company_name,
+                    document_type=new_type,
+                    document_date=date,
+                )
+                merged.append(merged_seg)
+                i += 2
+                continue
+
+        merged.append(segments[i])
+        i += 1
+
+    return merged
 
 
 def _extract_doc_prefix_from_filename(filename: str) -> str:
@@ -595,7 +652,7 @@ def _detect_boundaries_ai(page_texts: list[str]) -> list[DocumentSegment]:
         segments[-1].page_end = page_count
 
     segments = [s for s in segments if s.page_start <= page_count]
-    return segments
+    return _merge_resignation_appointment(segments)
 
 
 def _normalize_doc_type(doc_type: str | None) -> str | None:
@@ -636,7 +693,7 @@ def _normalize_doc_type(doc_type: str | None) -> str | None:
 
 
 def _normalize_date(date_str: str | None) -> str | None:
-    """Normalize a date string to YYYY-MM-DD."""
+    """Normalize a date string to YYYY-MM-DD. Returns None if unrecognizable."""
     if not date_str:
         return None
 
@@ -649,7 +706,7 @@ def _normalize_date(date_str: str | None) -> str | None:
     if m:
         return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
 
-    return date_str
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -740,8 +797,11 @@ def _split_pdf_by_segments(
 # Interactive review
 # ---------------------------------------------------------------------------
 
-def _display_segments(segments: list[DocumentSegment]) -> None:
+def _display_segments(segments: list[DocumentSegment], filename: str = "") -> None:
     """Print the segment table with aligned columns and date warnings."""
+    if filename:
+        print(f"  File: {filename}")
+        print()
     # Column header
     print(
         f"  {'#':>3}  {'Pages':<10}  {'Date':<12}  {'Abbr':<6}  {'Document Type'}"
@@ -773,6 +833,7 @@ def _display_segments(segments: list[DocumentSegment]) -> None:
 
 def _interactive_review(
     segments: list[DocumentSegment], total_pages: int,
+    filename: str = "",
 ) -> list[DocumentSegment] | None:
     """Show detected segments and let the user confirm, edit, or cancel.
 
@@ -781,7 +842,7 @@ def _interactive_review(
     print("\n" + "=" * 70)
     print("  Detected document segments (review before splitting)")
     print("=" * 70)
-    _display_segments(segments)
+    _display_segments(segments, filename)
     print("=" * 70)
     print("  Options:")
     print("    Enter  = Accept and split")
@@ -802,12 +863,12 @@ def _interactive_review(
         elif choice == "e":
             segments = _edit_segment(segments, total_pages)
             print()
-            _display_segments(segments)
+            _display_segments(segments, filename)
 
         elif choice == "d":
             segments = _delete_segment(segments, total_pages)
             print()
-            _display_segments(segments)
+            _display_segments(segments, filename)
 
         else:
             print("  Invalid choice. Press Enter to accept, 'e' to edit, 'd' to delete, 'c' to cancel.")
@@ -816,7 +877,7 @@ def _interactive_review(
 def _edit_segment(
     segments: list[DocumentSegment], total_pages: int,
 ) -> list[DocumentSegment]:
-    """Edit one segment's fields interactively."""
+    """Edit one segment's fields interactively with input validation."""
     try:
         idx = int(input("  Segment # to edit: ").strip()) - 1
         if idx < 0 or idx >= len(segments):
@@ -830,21 +891,48 @@ def _edit_segment(
     print(f"  Editing segment {idx + 1}: Pages {seg.page_start}-{seg.page_end}")
     print("  (Press Enter to keep current value)\n")
 
-    val = input(f"    page_start [{seg.page_start}]: ").strip()
-    if val:
-        seg.page_start = int(val)
+    # page_start — must be a valid integer
+    while True:
+        val = input(f"    page_start [{seg.page_start}]: ").strip()
+        if not val:
+            break
+        try:
+            page = int(val)
+            if 1 <= page <= total_pages:
+                seg.page_start = page
+                break
+            print(f"    ⚠ Must be between 1 and {total_pages}. Try again.")
+        except ValueError:
+            print("    ⚠ Must be a number. Try again.")
 
-    val = input(f"    page_end [{seg.page_end}]: ").strip()
-    if val:
-        seg.page_end = int(val)
+    # page_end — must be a valid integer >= page_start
+    while True:
+        val = input(f"    page_end [{seg.page_end}]: ").strip()
+        if not val:
+            break
+        try:
+            page = int(val)
+            if seg.page_start <= page <= total_pages:
+                seg.page_end = page
+                break
+            print(f"    ⚠ Must be between {seg.page_start} and {total_pages}. Try again.")
+        except ValueError:
+            print("    ⚠ Must be a number. Try again.")
 
     val = input(f"    document_type [{seg.document_type}]: ").strip()
     if val:
         seg.document_type = val
 
-    val = input(f"    document_date [{seg.document_date}]: ").strip()
-    if val:
-        seg.document_date = _normalize_date(val)
+    # document_date — must normalize to YYYY-MM-DD or "no-date"
+    while True:
+        val = input(f"    document_date [{seg.document_date or 'no-date'}]: ").strip()
+        if not val:
+            break
+        normalized = _normalize_date(val)
+        if normalized:
+            seg.document_date = normalized
+            break
+        print("    ⚠ Invalid date format. Use DD/MM/YYYY or YYYY-MM-DD. Try again.")
 
     val = input(f"    company_name [{seg.company_name}]: ").strip()
     if val:
@@ -947,7 +1035,7 @@ def split_pdf(pdf_path: Path, output_folder: Path | None = None) -> list[Path]:
         )
 
     # Step 2b: Interactive review — let user confirm or adjust
-    segments = _interactive_review(segments, len(page_texts))
+    segments = _interactive_review(segments, len(page_texts), filename=pdf_path.name)
 
     if not segments:
         logger.info("Split cancelled by user.")

@@ -28,10 +28,17 @@ class PDFHandler(FileSystemEventHandler):
     def on_created(self, event: FileCreatedEvent) -> None:
         if event.is_directory:
             return
-        path = Path(event.src_path)
+        self._enqueue_if_pdf(Path(event.src_path))
+
+    def on_moved(self, event) -> None:
+        """Handle files moved/renamed into the watched folder."""
+        if event.is_directory:
+            return
+        self._enqueue_if_pdf(Path(event.dest_path))
+
+    def _enqueue_if_pdf(self, path: Path) -> None:
         if path.suffix.lower() != ".pdf":
             return
-
         logger.info("New PDF detected: %s", path.name)
         self._wait_until_stable(path)
         self._queue.put(path)
